@@ -119,11 +119,14 @@ func CalendarHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			return
 		}
 
-		// Clean calendar data before storage
+		// Clean calendar data before normalization
 		scraper.CleanCalendarData(calendarData)
 
-		// Store in public.calendar table with course="Default" and semester=0
-		err = db.UpsertCalendar("Default", 0, calendarData)
+		// Normalize calendar data to flat structure
+		normalizedCalendar := scraper.NormalizeCalendarData(calendarData)
+
+		// Store normalized calendar data in public.calendar table with course="Default" and semester=0
+		err = db.UpsertCalendar("Default", 0, normalizedCalendar)
 		if err != nil {
 			logger.ErrorWithUser(email, "calendar_handler", "Failed to store calendar", err, nil)
 			json.NewEncoder(w).Encode(models.SuccessResponse{Success: false})

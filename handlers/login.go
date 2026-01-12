@@ -48,7 +48,7 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 		// Return success with user ID
 		json.NewEncoder(w).Encode(models.LoginResponse{
 			Success: true,
-			UserInfo: &models.UserInfo{}, // Empty user info for now
+			UserId:  userID,
 		})
 	}
 }

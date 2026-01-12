@@ -13,6 +13,7 @@ type LoginRequest struct {
 // LoginResponse represents the login response to frontend
 type LoginResponse struct {
 	Success  bool      `json:"success"`
+	UserId   string    `json:"X-User-Id,omitempty"`
 	UserInfo *UserInfo `json:"userInfo,omitempty"`
 	Tokens   string    `json:"tokens,omitempty"`
 	Captcha  string    `json:"captcha,omitempty"`  // base64 encoded captcha image
@@ -61,10 +62,11 @@ type CoursesData struct {
 type TimetableSlot struct {
 	Code       string `json:"code"`
 	Name       string `json:"name"`
+	SlotType   string `json:"slotType"`
 	Slot       string `json:"slot"`
+	Online     bool   `json:"online"`
 	RoomNo     string `json:"roomNo"`
 	CourseType string `json:"courseType"`
-	Online     bool   `json:"online"`
 	IsOptional bool   `json:"isOptional"`
 }
 
@@ -95,7 +97,7 @@ type CalendarMonth struct {
 	Dates []CalendarDay `json:"dates"`
 }
 
-// CalendarData represents the complete calendar data
+// CalendarData represents the complete calendar data (legacy nested format)
 type CalendarData struct {
 	Error    bool            `json:"error"`
 	Message  *string         `json:"message"`
@@ -104,6 +106,23 @@ type CalendarData struct {
 	Tomorrow *CalendarDay    `json:"tomorrow"`
 	Index    int             `json:"index"`
 	Calendar []CalendarMonth `json:"calendar"`
+}
+
+// NormalizedCalendarEntry represents a single normalized calendar entry
+type NormalizedCalendarEntry struct {
+	Date     string `json:"date"`      // DD/MM/YYYY format
+	DayName  string `json:"day_name"`  // Mon, Tue, etc.
+	Event    *string `json:"event"`    // Holiday name or null
+	DayOrder string `json:"day_order"` // Day 1, Day 2, etc.
+	Month    string `json:"month"`     // Jan, Feb, etc.
+	Year     int    `json:"year"`      // 2025, 2026, etc.
+}
+
+// NormalizedCalendarData represents the complete normalized calendar data
+type NormalizedCalendarData struct {
+	Calendar []NormalizedCalendarEntry `json:"calendar"`
+	Today    *NormalizedCalendarEntry  `json:"today,omitempty"`
+	Tomorrow *NormalizedCalendarEntry  `json:"tomorrow,omitempty"`
 }
 
 // TokenData represents session tokens stored in Supabase
