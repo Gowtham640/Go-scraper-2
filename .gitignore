@@ -1,0 +1,56 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+courses.html
+users.html
+calendar.html
+timetable.html
+calendar_raw.html
+run.txt
+tables.md
+tt.md
+srm-academia-scraper.zip
+srm-academia-scraper.tar.gz
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Build output
+/scraper
+/scraper.exe
+/build/
+/dist/
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/

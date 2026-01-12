@@ -1,0 +1,140 @@
+package models
+
+import "time"
+
+// LoginRequest represents the login request from frontend
+type LoginRequest struct {
+	Account  string `json:"account"`
+	Password string `json:"password"`
+	CDigest  string `json:"cdigest,omitempty"`
+	Captcha  string `json:"captcha,omitempty"`
+}
+
+// LoginResponse represents the login response to frontend
+type LoginResponse struct {
+	Success  bool      `json:"success"`
+	UserInfo *UserInfo `json:"userInfo,omitempty"`
+	Tokens   string    `json:"tokens,omitempty"`
+	Captcha  string    `json:"captcha,omitempty"`  // base64 encoded captcha image
+	CDigest  string    `json:"cdigest,omitempty"`  // captcha digest for retry
+	Error    string    `json:"error,omitempty"`
+}
+
+// UserInfo represents user profile data
+type UserInfo struct {
+	Name           string `json:"name"`
+	Mobile         string `json:"mobile"`
+	Program        string `json:"program"`
+	Semester       int    `json:"semester"`
+	RegNumber      string `json:"regNumber"`
+	Batch          string `json:"batch"`
+	Year           int    `json:"year"`
+	Department     string `json:"department"`
+	Section        string `json:"section"`
+	Specialization string `json:"specialization,omitempty"`
+}
+
+// Course represents a single course
+type Course struct {
+	Code           string `json:"code"`
+	Title          string `json:"title"`
+	Credit         string `json:"credit"`
+	Category       string `json:"category"`
+	CourseCategory string `json:"courseCategory"`
+	Type           string `json:"type"`
+	SlotType       string `json:"slotType"`
+	Faculty        string `json:"faculty"`
+	Slot           string `json:"slot"`
+	Room           string `json:"room"`
+	AcademicYear   string `json:"academicYear"`
+}
+
+// CoursesData represents the complete courses data for caching
+type CoursesData struct {
+	RegNumber string   `json:"regNumber"`
+	Courses   []Course `json:"courses"`
+	Status    int      `json:"status"`
+	Error     *string  `json:"error"`
+}
+
+// TimetableSlot represents a single slot in the timetable
+type TimetableSlot struct {
+	Code       string `json:"code"`
+	Name       string `json:"name"`
+	Slot       string `json:"slot"`
+	RoomNo     string `json:"roomNo"`
+	CourseType string `json:"courseType"`
+	Online     bool   `json:"online"`
+	IsOptional bool   `json:"isOptional"`
+}
+
+// TimetableDay represents one day in the timetable
+type TimetableDay struct {
+	Day   int                `json:"day"`
+	Table []*TimetableSlot   `json:"table"`
+}
+
+// TimetableData represents the complete timetable data for caching
+type TimetableData struct {
+	RegNumber string         `json:"regNumber"`
+	Batch     string         `json:"batch"`
+	Schedule  []TimetableDay `json:"schedule"`
+}
+
+// CalendarDay represents a single day in the calendar
+type CalendarDay struct {
+	Date     int     `json:"date"`
+	Day      string  `json:"day"`
+	Event    *string `json:"event"`
+	DayOrder string  `json:"day_order"`
+}
+
+// CalendarMonth represents a month in the calendar
+type CalendarMonth struct {
+	Month string        `json:"month"`
+	Dates []CalendarDay `json:"dates"`
+}
+
+// CalendarData represents the complete calendar data
+type CalendarData struct {
+	Error    bool            `json:"error"`
+	Message  *string         `json:"message"`
+	Status   int             `json:"status"`
+	Today    *CalendarDay    `json:"today"`
+	Tomorrow *CalendarDay    `json:"tomorrow"`
+	Index    int             `json:"index"`
+	Calendar []CalendarMonth `json:"calendar"`
+}
+
+// TokenData represents session tokens stored in Supabase
+type TokenData struct {
+	UserID          string    `json:"user_id"`
+	Tokens          string    `json:"tokens"` // All cookies stored as string
+	ExpiryTimestamp time.Time `json:"expiry_timestamp"`
+	Email           string    `json:"email"`
+}
+
+// SuccessResponse is a generic success response
+type SuccessResponse struct {
+	Success bool `json:"success"`
+}
+
+// HealthResponse represents health check response
+type HealthResponse struct {
+	Status    string            `json:"status"`
+	Timestamp string            `json:"timestamp"`
+	Services  map[string]string `json:"services"`
+}
+
+// LookupResponse represents user lookup API response
+type LookupResponse struct {
+	Identifier string `json:"identifier"`
+	Digest     string `json:"digest"`
+}
+
+// CaptchaResponse represents CAPTCHA API response
+type CaptchaResponse struct {
+	Captcha struct {
+		ImageBytes string `json:"image_bytes"`
+	} `json:"captcha"`
+}
