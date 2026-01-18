@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"srm-academia-scraper/auth"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
@@ -48,6 +49,16 @@ func FetchCoursesData(db *storage.SupabaseClient, userID, email, password string
 	httpClient := scraper.NewHTTPClient()
 	htmlContent, err := httpClient.GetWithCookies(scraper.TimeTableURL, cookies)
 
+	// ALWAYS save the fetched HTML content to tt.html for debugging
+	if htmlContent != nil {
+		err := os.WriteFile("tt.html", htmlContent, 0644)
+		if err != nil {
+			logger.WarnWithUser(email, "fetch_courses_data", "Failed to save HTML content to tt.html", map[string]interface{}{"error": err.Error()})
+		} else {
+			logger.InfoWithUser(email, "fetch_courses_data", "HTML content saved to tt.html", map[string]interface{}{"length": len(htmlContent)})
+		}
+	}
+
 	// If request fails with 401 AND token is expired, trigger browser login
 	if err != nil && strings.Contains(err.Error(), "401") && isExpired {
 		logger.InfoWithUser(email, "fetch_courses_data", "Token expired and 401 received, triggering browser login", nil)
@@ -78,6 +89,16 @@ func FetchCoursesData(db *storage.SupabaseClient, userID, email, password string
 		if err != nil {
 			logger.ErrorWithUser(email, "fetch_courses_data", "Failed to fetch courses data with new token", err, nil)
 			return nil, err
+		}
+
+		// ALWAYS save the fetched HTML content to tt.html for debugging (browser login retry)
+		if htmlContent != nil {
+			err := os.WriteFile("tt.html", htmlContent, 0644)
+			if err != nil {
+				logger.WarnWithUser(email, "fetch_courses_data", "Failed to save HTML content to tt.html (retry)", map[string]interface{}{"error": err.Error()})
+			} else {
+				logger.InfoWithUser(email, "fetch_courses_data", "HTML content saved to tt.html (retry)", map[string]interface{}{"length": len(htmlContent)})
+			}
 		}
 	} else if err != nil {
 		logger.ErrorWithUser(email, "fetch_courses_data", "Failed to fetch courses data", err, nil)

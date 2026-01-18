@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,7 @@ func (s *SessionManager) PerformBrowserLogin(userID, email, password string) (st
 
 	// Path to auth-browser directory
 	authBrowserDir := filepath.Join(wd, "auth-browser")
+	logger.InfoWithUser(email, "session_browser_login", fmt.Sprintf("Auth browser directory: %s", authBrowserDir), nil)
 
 	// Set up environment variables
 	env := os.Environ()
@@ -65,19 +67,56 @@ func (s *SessionManager) PerformBrowserLogin(userID, email, password string) (st
 	env = append(env, fmt.Sprintf("SRM_PASSWORD=%s", password))
 	env = append(env, "TIMEOUT_SECONDS=30")
 
+	logger.InfoWithUser(email, "session_browser_login", "Environment variables configured", map[string]interface{}{
+		"email_configured": email != "",
+		"password_configured": password != "",
+		"timeout_seconds": 30,
+	})
+
 	// Create command
 	cmd := exec.Command("node", "login.js")
 	cmd.Dir = authBrowserDir
 	cmd.Env = env
 
-	// Capture stdout
-	output, err := cmd.Output()
+	logger.InfoWithUser(email, "session_browser_login", "Executing Node.js login script", map[string]interface{}{
+		"command": "node login.js",
+		"working_directory": authBrowserDir,
+	})
+
+	// Get stdout pipe for JSON response only
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		logger.ErrorWithUser(email, "session_browser_login", "Node.js process failed", err, nil)
+		logger.ErrorWithUser(email, "session_browser_login", "Failed to get stdout pipe", err, nil)
+		return "", fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		logger.ErrorWithUser(email, "session_browser_login", "Failed to start Node.js process", err, nil)
+		return "", fmt.Errorf("failed to start browser login process: %v", err)
+	}
+
+	// Read only stdout (JSON response)
+	output, err := io.ReadAll(stdout)
+	outputStr := string(output)
+
+	logger.InfoWithUser(email, "session_browser_login", "Node.js process completed", map[string]interface{}{
+		"stdout_length": len(outputStr),
+	})
+
+	// Wait for command to finish and get exit code
+	if err := cmd.Wait(); err != nil {
+		logger.ErrorWithUser(email, "session_browser_login", "Node.js process failed", err, map[string]interface{}{
+			"stdout": outputStr,
+		})
 		return "", fmt.Errorf("browser login process failed: %v", err)
 	}
 
-	// Parse JSON response
+	// Parse JSON response from stdout only
+	logger.InfoWithUser(email, "session_browser_login", "Parsing Node.js JSON response from stdout", map[string]interface{}{
+		"stdout_content": outputStr,
+	})
+
 	var response struct {
 		Status    string                   `json:"status"`
 		Timestamp string                   `json:"timestamp"`
@@ -87,9 +126,18 @@ func (s *SessionManager) PerformBrowserLogin(userID, email, password string) (st
 	}
 
 	if err := json.Unmarshal(output, &response); err != nil {
-		logger.ErrorWithUser(email, "session_browser_login", "Failed to parse Node.js response", err, nil)
+		logger.ErrorWithUser(email, "session_browser_login", "Failed to parse Node.js JSON response", err, map[string]interface{}{
+			"stdout_content": outputStr,
+		})
 		return "", fmt.Errorf("failed to parse browser login response: %v", err)
 	}
+
+	logger.InfoWithUser(email, "session_browser_login", "Node.js response parsed successfully", map[string]interface{}{
+		"status": response.Status,
+		"timestamp": response.Timestamp,
+		"has_cookies": len(response.Cookies) > 0,
+		"cookie_count": len(response.Cookies),
+	})
 
 	// Handle error response
 	if response.Status == "error" {
@@ -102,26 +150,59 @@ func (s *SessionManager) PerformBrowserLogin(userID, email, password string) (st
 
 	// Handle success response
 	if response.Status == "success" && len(response.Cookies) > 0 {
+		logger.InfoWithUser(email, "session_browser_login", "Processing successful login response", map[string]interface{}{
+			"cookie_count": len(response.Cookies),
+		})
+
 		// Convert cookies to HTTP header format (semicolon separated)
 		var cookieStrings []string
+		var cookieNames []string
 		for _, cookie := range response.Cookies {
 			if name, ok := cookie["name"].(string); ok {
 				if value, ok := cookie["value"].(string); ok {
 					cookieStrings = append(cookieStrings, fmt.Sprintf("%s=%s", name, value))
+					cookieNames = append(cookieNames, name)
 				}
 			}
 		}
 
 		cookiesStr := strings.Join(cookieStrings, "; ")
+
+		// Check for essential cookies
+		essentialCookies := []string{"JSESSIONID", "iamcsr", "zccpn", "_zcsr_tmp", "stk", "__Secure-iamsdt_client_10002227248", "_iamadt_client_10002227248", "_iambdt_client_10002227248", "wms-tkp-token_client_10002227248"}
+		foundEssential := []string{}
+		missingEssential := []string{}
+
+		cookieNameSet := make(map[string]bool)
+		for _, name := range cookieNames {
+			cookieNameSet[name] = true
+		}
+
+		for _, essential := range essentialCookies {
+			if cookieNameSet[essential] {
+				foundEssential = append(foundEssential, essential)
+			} else {
+				missingEssential = append(missingEssential, essential)
+			}
+		}
+
 		logger.InfoWithUser(email, "session_browser_login", "Browser login successful", map[string]interface{}{
 			"cookie_count": len(response.Cookies),
+			"cookie_names": cookieNames,
+			"cookies_length": len(cookiesStr),
+			"found_essential_cookies": foundEssential,
+			"missing_essential_cookies": missingEssential,
 		})
 
 		return cookiesStr, nil
 	}
 
-	logger.ErrorWithUser(email, "session_browser_login", "Unexpected response format", nil, nil)
-	return "", fmt.Errorf("unexpected browser login response")
+	logger.ErrorWithUser(email, "session_browser_login", "Unexpected response format", nil, map[string]interface{}{
+		"status": response.Status,
+		"has_cookies": len(response.Cookies) > 0,
+		"response_keys": []string{"status", "timestamp", "cookies", "reason", "details"},
+	})
+	return "", fmt.Errorf("unexpected browser login response: status=%s, cookies=%d", response.Status, len(response.Cookies))
 }
 
 // PerformLogin performs authentication and stores the new token
