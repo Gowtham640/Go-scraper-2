@@ -101,7 +101,7 @@ async function performLogin() {
 
     // Launch browser
     browser = await chromium.launch({
-      headless: false,
+      headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -434,8 +434,9 @@ async function performLogin() {
               const isNext = url.href.includes('/preannouncement/block-sessions/next');
               const isLogin = url.href.includes('/login') || url.href.includes('redirectLogin') || url.href.includes('signin');
               const isAccounts = url.href.includes('/accounts/');
-              console.error(`🔍 Portal: ${isPortal}, Welcome: ${isWelcome}, Next: ${isNext}, Login: ${isLogin}, Accounts: ${isAccounts}`);
-              return isPortal || isWelcome || isNext || isLogin || isAccounts;
+              const isRedirectFromLogin = url.href.includes('redirectFromLogin');
+              console.error(`🔍 Portal: ${isPortal}, Welcome: ${isWelcome}, Next: ${isNext}, Login: ${isLogin}, Accounts: ${isAccounts}, RedirectFromLogin: ${isRedirectFromLogin}`);
+              return isPortal || isWelcome || isNext || isLogin || isAccounts || isRedirectFromLogin;
             },
             { timeout: 30000 }
           );
@@ -452,7 +453,8 @@ async function performLogin() {
           const isWelcome = currentUrl.includes('#WELCOME');
           const isLogin = currentUrl.includes('/login') || currentUrl.includes('redirectLogin') || currentUrl.includes('signin');
           const isAccounts = currentUrl.includes('/accounts/');
-          console.error(`🔍 Catch block check - Session: ${isSessionPage}, Portal: ${isPortal}, Welcome: ${isWelcome}, Login: ${isLogin}, Accounts: ${isAccounts}`);
+          const isRedirectFromLogin = currentUrl.includes('redirectFromLogin');
+          console.error(`🔍 Catch block check - Session: ${isSessionPage}, Portal: ${isPortal}, Welcome: ${isWelcome}, Login: ${isLogin}, Accounts: ${isAccounts}, RedirectFromLogin: ${isRedirectFromLogin}`);
 
           // If we're still on a session limit page, something went wrong
           if (isSessionPage) {
@@ -460,20 +462,20 @@ async function performLogin() {
           }
 
           // If we're on any valid redirect destination, continue
-          if (isPortal || isWelcome || isLogin || isAccounts) {
+          if (isPortal || isWelcome || isLogin || isAccounts || isRedirectFromLogin) {
             console.error('✅ Reached valid redirect destination, continuing...');
 
             // For login/redirect URLs, wait for dashboard
-            if (isLogin || isAccounts) {
-              console.error('⏳ Waiting for dashboard redirect from login page...');
+            if (isLogin || isAccounts || isRedirectFromLogin) {
+              console.error('⏳ Waiting for final dashboard redirect...');
               try {
                 await page.waitForURL(
-                  (url) => url.href.includes('/portal/academia-academic-services') || url.hash.includes('#WELCOME'),
+                  (url) => url.href.includes('/portal/academia-academic-services') && !url.href.includes('redirectFromLogin'),
                   { timeout: 10000 }
                 );
-                console.error('✅ Reached dashboard after login redirect');
+                console.error('✅ Reached final dashboard after redirect');
               } catch (dashboardError) {
-                console.error('⚠️ Dashboard redirect timeout, but login redirect indicates success');
+                console.error('⚠️ Final dashboard redirect timeout, but redirect indicates success');
               }
             }
           } else {
@@ -490,23 +492,24 @@ async function performLogin() {
         const isWelcomeUrl = afterSessionLimitUrl.includes('#WELCOME');
         const isLoginUrl = afterSessionLimitUrl.includes('/login') || afterSessionLimitUrl.includes('redirectLogin') || afterSessionLimitUrl.includes('signin');
         const isAccountsUrl = afterSessionLimitUrl.includes('/accounts/');
-        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}`);
+        const isRedirectFromLoginUrl = afterSessionLimitUrl.includes('redirectFromLogin');
+        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}, RedirectFromLogin: ${isRedirectFromLoginUrl}`);
 
         if (isPortalUrl || isWelcomeUrl || isLoginUrl || isAccountsUrl) {
           console.error('🎉 SESSION LIMIT BYPASSED: Successfully redirected');
 
           // For login/redirect URLs, we need to wait for the actual dashboard redirect
-          if (isLoginUrl || isAccountsUrl) {
-            console.error('⏳ Waiting for final dashboard redirect from login page...');
+          if (isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl) {
+            console.error('⏳ Waiting for final dashboard redirect...');
             try {
               await page.waitForURL(
-                (url) => url.href.includes('/portal/academia-academic-services') || url.hash.includes('#WELCOME'),
+                (url) => url.href.includes('/portal/academia-academic-services') && !url.href.includes('redirectFromLogin'),
                 { timeout: 15000 }
               );
-              console.error('✅ Reached dashboard after login redirect');
+              console.error('✅ Reached final dashboard after redirect');
             } catch (finalRedirectError) {
-              console.error('⚠️ Final dashboard redirect not detected, but login redirect was successful');
-              // Continue anyway since login redirect indicates session termination worked
+              console.error('⚠️ Final dashboard redirect not detected, but redirect was successful');
+              // Continue anyway since redirect indicates session termination worked
             }
           }
 
