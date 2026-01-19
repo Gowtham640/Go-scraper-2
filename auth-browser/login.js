@@ -2,6 +2,69 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
+// Function to establish WMS session - ONLY runs when confirmed on dashboard
+async function establishWMSSession(page) {
+  const currentUrl = page.url();
+  const isPortal = currentUrl.includes('/portal/academia-academic-services');
+  const isWelcome = currentUrl.includes('#WELCOME');
+
+  if (!isPortal && !isWelcome) {
+    console.error('⚠️ WMS establishment skipped: Not on dashboard page');
+    console.error(`📍 Current URL: ${currentUrl}`);
+    return false;
+  }
+
+  console.error(`🔄 Establishing WMS session on ${isPortal ? 'portal' : 'welcome'} page: ${currentUrl}`);
+
+  try {
+    // 🔐 Wait for authenticated API call (real session validation)
+    await page.waitForResponse(response => {
+      const url = response.url();
+      return (
+        response.status() === 200 &&
+        url.includes('/srm_university/academia-academic-services/') &&
+        response.headers()['set-cookie'] // Must set session cookies
+      );
+    }, { timeout: 15000 });
+
+    console.error('✅ Authenticated session validated');
+
+    // Now safe to navigate inside SPA
+    console.error('🔗 Navigating inside app to My_Time_Table_Attendance');
+    await page.evaluate(() => {
+      window.location.hash = 'My_Time_Table_Attendance';
+    });
+
+    console.error('✅ Navigation completed');
+
+    console.error('🔄 Waiting for WMS session initialization...');
+
+    try {
+      // This waits for the specific background API call that issues the WMS token
+      await page.waitForResponse(response => {
+        return response.url().includes('wms') ||
+          (response.headers()['set-cookie'] && response.headers()['set-cookie'].includes('wms-tkp-token'));
+      }, { timeout: 10000 });
+
+      console.error('✅ WMS Token detected in network traffic');
+    } catch (e) {
+      console.error('⚠️ WMS network response not detected, falling back to element check');
+      // Fallback: Wait for a specific UI element on the attendance page to be visible
+      await page.waitForSelector('.custom_table, #attendance_det', { timeout: 5000 }).catch(() => { });
+    }
+
+    // Final safety buffer to allow the browser context to register the cookie
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    console.error('✅ WMS session establishment completed');
+    return true;
+  } catch (navigationError) {
+    console.error('⚠️ WMS session establishment failed, continuing with current page');
+    console.error(`Error: ${navigationError.message}`);
+    return false;
+  }
+}
+
 async function performLogin() {
   console.error('🔄 STEP 1: Reading environment variables...');
   const startTime = Date.now();
@@ -207,6 +270,14 @@ async function performLogin() {
     console.error('⏳ No timeout limit - waiting indefinitely');
     const stepCookiesStart = Date.now();
 
+    // Add explicit page content checking after login submission
+    await page.waitForTimeout(2000); // Brief pause for page updates
+    const currentPageContent = await page.content();
+    const hasSessionLimitContent = currentPageContent.includes('Maximum concurrent sessions limit exceeded') ||
+      currentPageContent.includes('Terminate All Sessions');
+    const hasRateLimitContent = currentPageContent.includes('signin-block') ||
+      currentPageContent.includes('Too many attempts');
+
     // Wait for navigation or rate limit page or session limit page
     try {
       await page.waitForURL(
@@ -228,65 +299,19 @@ async function performLogin() {
             return true;
           }
           return false;
-        }
+        },
+        { timeout: 10000 } // Add reasonable timeout for URL detection
       );
 
       console.error(`⏱️  Step 14 duration: ${Date.now() - stepCookiesStart}ms`);
       const finalUrl = page.url();
       console.error(`✅ Redirect detected to: ${finalUrl}`);
 
-      if (finalUrl.includes('/portal/academia-academic-services')) {
+      if (finalUrl.includes('/portal/academia-academic-services') || finalUrl.hash.includes('#WELCOME')) {
         console.error('🎉 LOGIN SUCCESS: Redirected to portal home page');
 
-        // Establish WMS session and navigate to timetable page
-        try {
-          console.error('🔄 STEP 14: Establishing WMS session and navigating to timetable...');
-
-          // 🔐 Wait for authenticated API call (real session validation)
-          await page.waitForResponse(response => {
-            const url = response.url();
-            return (
-              response.status() === 200 &&
-              url.includes('/srm_university/academia-academic-services/') &&
-              response.headers()['set-cookie'] // Must set session cookies
-            );
-          }, { timeout: 15000 });
-
-          console.error('✅ Authenticated session validated');
-
-          // Now safe to navigate inside SPA
-          console.error('🔗 Navigating inside app to My_Time_Table_Attendance');
-          await page.evaluate(() => {
-            window.location.hash = 'My_Time_Table_Attendance';
-          });
-
-          console.error('✅ Navigation completed');
-
-          console.error('🔄 STEP 14.1: Waiting for WMS session initialization...');
-
-          try {
-            // This waits for the specific background API call that issues the WMS token
-            await page.waitForResponse(response => {
-              return response.url().includes('wms') ||
-                (response.headers()['set-cookie'] && response.headers()['set-cookie'].includes('wms-tkp-token'));
-            }, { timeout: 10000 });
-
-            console.error('✅ WMS Token detected in network traffic');
-          } catch (e) {
-            console.error('⚠️ WMS network response not detected, falling back to element check');
-            // Fallback: Wait for a specific UI element on the attendance page to be visible
-            await page.waitForSelector('.custom_table, #attendance_det', { timeout: 5000 }).catch(() => { });
-          }
-
-          // Final safety buffer to allow the browser context to register the cookie
-          await new Promise(resolve => setTimeout(resolve, 3000));
-
-        } catch (navigationError) {
-          console.error('⚠️  Session establishment or navigation failed, continuing with current page');
-          console.error(`Error: ${navigationError.message}`);
-          // Continue to cookie extraction even if navigation fails
-        }
-
+        // Establish WMS session - only runs when confirmed on dashboard
+        await establishWMSSession(page);
       } else if (finalUrl.includes('/announcement/signin-block')) {
         console.error('⚠️  RATE LIMIT DETECTED: On rate limit page');
       } else if (finalUrl.includes('/preannouncement/block-sessions')) {
@@ -324,135 +349,135 @@ async function performLogin() {
         if (afterRateLimitUrl.includes('/portal/academia-academic-services')) {
           console.error('🎉 RATE LIMIT BYPASSED: Successfully logged in');
 
-          // Establish WMS session and navigate to timetable page
-          try {
-            console.error('🔄 STEP 14: Establishing WMS session and navigating to timetable...');
-
-            // 🔐 Wait for authenticated API call (real session validation)
-            await page.waitForResponse(response => {
-              const url = response.url();
-              return (
-                response.status() === 200 &&
-                url.includes('/srm_university/academia-academic-services/') &&
-                response.headers()['set-cookie'] // Must set session cookies
-              );
-            }, { timeout: 15000 });
-
-            console.error('✅ Authenticated session validated');
-
-            // Step 1: Navigate via real route, not hash
-            console.error('🔗 Navigating to My_Time_Table_Attendance via real route');
-            await page.goto(
-              'https://academia.srmist.edu.in/portal/academia-academic-services/My_Time_Table_Attendance',
-              { waitUntil: 'networkidle' }
-            );
-
-            console.error('✅ Navigation completed');
-
-            // Step 2: Explicitly wait for WMS API calls
-            await page.waitForResponse(response => {
-              return (
-                response.url().includes('/wms/') &&
-                response.status() === 200
-              );
-            }, { timeout: 30000 });
-
-            console.error('✅ WMS API calls completed');
-
-            // Step 3: Verify cookie appearance BEFORE extraction
-            await page.waitForFunction(() =>
-              document.cookie.includes('wms-tkp-token'),
-              { timeout: 15000 }
-            );
-
-            console.error('✅ WMS cookies verified');
-
-          } catch (navigationError) {
-            console.error('⚠️  Session establishment or navigation failed, continuing with current page');
-            console.error(`Error: ${navigationError.message}`);
-            // Continue to cookie extraction even if navigation fails
-          }
-
+          // Establish WMS session - only runs when confirmed on dashboard
+          await establishWMSSession(page);
         } else {
           throw new Error('RATE_LIMIT_BYPASS_FAILED');
         }
 
-      } else if (currentUrl.includes('/preannouncement/block-sessions')) {
+      } else if (currentUrl.includes('/preannouncement/block-sessions') ||
+        hasSessionLimitContent ||
+        (currentUrl.includes('/accounts/p/') && currentPageContent.includes('block-sessions'))) {
         console.error('🔄 SESSION LIMIT: On session limit page, terminating other sessions...');
         const sessionLimitStart = Date.now();
 
         // Handle session limit page - click "Terminate all other sessions"
         console.error('🔍 Looking for "Terminate all other sessions" button...');
 
-        // Always prioritize text-based selection for reliability
+        // Add proper page load waits before button interactions
+        await page.waitForLoadState('networkidle', { timeout: 10000 });
+        await page.waitForTimeout(3000); // Additional wait for dynamic content
+
+        // Improve button clicking strategy for anchor elements with JS handlers
         try {
           console.error('🔍 URL before button click:', page.url());
-          // Wait for the button to be visible and clickable - use exact text from HTML
-          await page.waitForSelector('text="Terminate All Sessions"', { timeout: 5000 });
-          await page.click('text="Terminate All Sessions"');
-          console.error('✅ Terminate All Sessions button clicked (by text)');
+
+          // First try: Direct click with force option for anchor elements with JS handlers
+          try {
+            const buttonElement = await page.locator('a.blue_btn.continue_button#continue_button').first();
+            await buttonElement.waitFor({ state: 'visible', timeout: 5000 });
+            await buttonElement.click({ force: true });
+            console.error('✅ Terminate All Sessions button clicked (direct locator with force)');
+          } catch (directError) {
+            // Second try: Text-based selection with improved waiting
+            await page.waitForSelector('text="Terminate All Sessions"', { timeout: 5000 });
+            await page.click('text="Terminate All Sessions"', { force: true });
+            console.error('✅ Terminate All Sessions button clicked (text with force)');
+          }
 
           // Brief pause to let any immediate redirects happen
           await new Promise(resolve => setTimeout(resolve, 1000));
           console.error('🔍 URL 1 second after button click:', page.url());
         } catch (textError) {
-          console.error('⚠️ Text selector failed, trying exact selector from current HTML...');
+          console.error('⚠️ Primary button clicking failed, trying alternative strategies...');
           try {
-            // Try the exact selector from the current HTML: a.blue_btn.continue_button#continue_button
-            await page.waitForSelector('a.blue_btn.continue_button#continue_button', { timeout: 5000 });
-            await page.click('a.blue_btn.continue_button#continue_button');
-            console.error('✅ Terminate All Sessions button clicked (by exact class + ID)');
+            // Third try: Use page.evaluate to trigger click event directly
+            await page.evaluate(() => {
+              const button = document.querySelector('a.blue_btn.continue_button#continue_button') ||
+                document.querySelector('a#continue_button') ||
+                Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === 'Terminate All Sessions');
+              if (button) {
+                button.click();
+                return true;
+              }
+              return false;
+            });
+            console.error('✅ Terminate All Sessions button clicked (via page.evaluate)');
 
             // Brief pause to let any immediate redirects happen
             await new Promise(resolve => setTimeout(resolve, 1000));
             console.error('🔍 URL 1 second after button click:', page.url());
-          } catch (exactError) {
-            console.error('❌ Exact selector failed, trying fallback selectors...');
-            // Try fallback selectors with the correct text
-            const altSelectors = ['text="Terminate All Sessions"', 'a#continue_button', '.blue_btn'];
-            let clicked = false;
-            for (const selector of altSelectors) {
-              try {
-                console.error('🔍 URL before alternative click:', page.url());
-                await page.waitForSelector(selector, { timeout: 3000 });
-                await page.click(selector);
-                console.error(`✅ Clicked using fallback selector: ${selector}`);
-
-                // Brief pause to let any immediate redirects happen
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                console.error('🔍 URL 1 second after alternative click:', page.url());
-                clicked = true;
-                break;
-              } catch (e) {
-                console.error(`❌ Fallback selector failed: ${selector}`);
-              }
-            }
-            if (!clicked) {
-              throw new Error('Could not find or click terminate sessions button');
-            }
+          } catch (evalError) {
+            console.error('❌ All button clicking strategies failed');
+            throw new Error('Could not find or click terminate sessions button');
           }
         }
 
         console.error('⏳ Waiting for redirect after session termination...');
+
+        // Log current URL every 5 seconds during wait
+        const urlLogger = setInterval(async () => {
+          try {
+            const currentUrl = page.url();
+            console.error(`🔍 Current URL during wait: ${currentUrl}`);
+          } catch (e) {
+            console.error('⚠️ Could not get current URL during wait');
+          }
+        }, 5000);
+
         try {
           await page.waitForURL(
-            (url) => url.href.includes('/portal/academia-academic-services'),
+            (url) => {
+              console.error(`🔍 waitForURL checking: ${url.href}`);
+              const isPortal = url.href.includes('/portal/academia-academic-services');
+              const isWelcome = url.hash.includes('#WELCOME');
+              const isNext = url.href.includes('/preannouncement/block-sessions/next');
+              const isLogin = url.href.includes('/login') || url.href.includes('redirectLogin') || url.href.includes('signin');
+              const isAccounts = url.href.includes('/accounts/');
+              console.error(`🔍 Portal: ${isPortal}, Welcome: ${isWelcome}, Next: ${isNext}, Login: ${isLogin}, Accounts: ${isAccounts}`);
+              return isPortal || isWelcome || isNext || isLogin || isAccounts;
+            },
             { timeout: 30000 }
           );
+          clearInterval(urlLogger);
+          console.error('✅ waitForURL completed successfully');
         } catch (redirectError) {
+          clearInterval(urlLogger);
           console.error('⚠️ Expected redirect did not occur, checking current URL...');
           const currentUrl = page.url();
           console.error(`📍 Current URL after button click: ${currentUrl}`);
 
+          const isSessionPage = currentUrl.includes('/announcement/') || currentUrl.includes('/preannouncement/');
+          const isPortal = currentUrl.includes('/portal/academia-academic-services');
+          const isWelcome = currentUrl.includes('#WELCOME');
+          const isLogin = currentUrl.includes('/login') || currentUrl.includes('redirectLogin') || currentUrl.includes('signin');
+          const isAccounts = currentUrl.includes('/accounts/');
+          console.error(`🔍 Catch block check - Session: ${isSessionPage}, Portal: ${isPortal}, Welcome: ${isWelcome}, Login: ${isLogin}, Accounts: ${isAccounts}`);
+
           // If we're still on a session limit page, something went wrong
-          if (currentUrl.includes('/announcement/') || currentUrl.includes('/preannouncement/')) {
+          if (isSessionPage) {
             throw new Error(`Failed to redirect from session limit page. Current URL: ${currentUrl}`);
           }
 
-          // If we're already on dashboard, continue
-          if (currentUrl.includes('/portal/academia-academic-services')) {
-            console.error('✅ Already on dashboard, continuing...');
+          // If we're on any valid redirect destination, continue
+          if (isPortal || isWelcome || isLogin || isAccounts) {
+            console.error('✅ Reached valid redirect destination, continuing...');
+
+            // For login/redirect URLs, wait for dashboard
+            if (isLogin || isAccounts) {
+              console.error('⏳ Waiting for dashboard redirect from login page...');
+              try {
+                await page.waitForURL(
+                  (url) => url.href.includes('/portal/academia-academic-services') || url.hash.includes('#WELCOME'),
+                  { timeout: 10000 }
+                );
+                console.error('✅ Reached dashboard after login redirect');
+              } catch (dashboardError) {
+                console.error('⚠️ Dashboard redirect timeout, but login redirect indicates success');
+              }
+            }
           } else {
+            console.error(`❌ Unexpected URL after session termination: ${currentUrl}`);
             throw new Error(`Unexpected URL after session termination: ${currentUrl}`);
           }
         }
@@ -461,200 +486,102 @@ async function performLogin() {
         const afterSessionLimitUrl = page.url();
         console.error(`✅ Redirected to: ${afterSessionLimitUrl}`);
 
-        if (afterSessionLimitUrl.includes('/portal/academia-academic-services')) {
-          console.error('🎉 SESSION LIMIT BYPASSED: Successfully logged in');
+        const isPortalUrl = afterSessionLimitUrl.includes('/portal/academia-academic-services');
+        const isWelcomeUrl = afterSessionLimitUrl.includes('#WELCOME');
+        const isLoginUrl = afterSessionLimitUrl.includes('/login') || afterSessionLimitUrl.includes('redirectLogin') || afterSessionLimitUrl.includes('signin');
+        const isAccountsUrl = afterSessionLimitUrl.includes('/accounts/');
+        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}`);
 
-          // Establish WMS session and navigate to timetable page
-          try {
-            console.error('🔄 STEP 14: Establishing WMS session and navigating to timetable...');
+        if (isPortalUrl || isWelcomeUrl || isLoginUrl || isAccountsUrl) {
+          console.error('🎉 SESSION LIMIT BYPASSED: Successfully redirected');
 
-            // 🔐 Wait for authenticated API call (real session validation)
-            await page.waitForResponse(response => {
-              const url = response.url();
-              return (
-                response.status() === 200 &&
-                url.includes('/srm_university/academia-academic-services/') &&
-                response.headers()['set-cookie'] // Must set session cookies
+          // For login/redirect URLs, we need to wait for the actual dashboard redirect
+          if (isLoginUrl || isAccountsUrl) {
+            console.error('⏳ Waiting for final dashboard redirect from login page...');
+            try {
+              await page.waitForURL(
+                (url) => url.href.includes('/portal/academia-academic-services') || url.hash.includes('#WELCOME'),
+                { timeout: 15000 }
               );
-            }, { timeout: 15000 });
-
-            console.error('✅ Authenticated session validated');
-
-            // Step 1: Navigate via real route, not hash
-            console.error('🔗 Navigating to My_Time_Table_Attendance via real route');
-            await page.goto(
-              'https://academia.srmist.edu.in/portal/academia-academic-services/My_Time_Table_Attendance',
-              { waitUntil: 'networkidle' }
-            );
-
-            console.error('✅ Navigation completed');
-
-            // Step 2: Explicitly wait for WMS API calls
-            await page.waitForResponse(response => {
-              return (
-                response.url().includes('/wms/') &&
-                response.status() === 200
-              );
-            }, { timeout: 30000 });
-
-            console.error('✅ WMS API calls completed');
-
-            // Step 3: Verify cookie appearance BEFORE extraction
-            await page.waitForFunction(() =>
-              document.cookie.includes('wms-tkp-token'),
-              { timeout: 15000 }
-            );
-
-            console.error('✅ WMS cookies verified');
-
-          } catch (navigationError) {
-            console.error('⚠️  Session establishment or navigation failed, continuing with current page');
-            console.error(`Error: ${navigationError.message}`);
-            // Continue to cookie extraction even if navigation fails
+              console.error('✅ Reached dashboard after login redirect');
+            } catch (finalRedirectError) {
+              console.error('⚠️ Final dashboard redirect not detected, but login redirect was successful');
+              // Continue anyway since login redirect indicates session termination worked
+            }
           }
 
+          // Establish WMS session - only runs when confirmed on dashboard
+          await establishWMSSession(page);
         } else {
+          console.error(`❌ SESSION LIMIT BYPASS FAILED: URL ${afterSessionLimitUrl} not recognized as valid redirect`);
           throw new Error('SESSION_LIMIT_BYPASS_FAILED');
         }
 
-      } else if (currentUrl.includes('/announcement/sessions-reminder')) {
-        console.error('🔄 SESSION LIMIT: On sessions reminder page, terminating other sessions...');
+      } else if (currentUrl.includes('/announcement/sessions-reminder') ||
+        (hasSessionLimitContent && currentPageContent.includes('sessions-reminder'))) {
+        console.error('🔄 SESSION LIMIT: On sessions reminder page, skipping for now...');
         const sessionLimitStart = Date.now();
 
-        // Handle sessions reminder page - click "Terminate all other sessions"
-        console.error('🔍 Looking for "Terminate all other sessions" button...');
+        // Handle sessions reminder page - click "remind me later"
+        console.error('🔍 Looking for "Skip for now" link...');
 
-        // Always prioritize text-based selection for reliability
+        // Add proper page load waits before button interactions
+        await page.waitForLoadState('networkidle', { timeout: 10000 });
+        await page.waitForTimeout(3000); // Additional wait for dynamic content
+
+        // Click the "remind me later" link
         try {
-          console.error('🔍 URL before button click:', page.url());
-          // Wait for the button to be visible and clickable - use exact text from HTML
-          await page.waitForSelector('text="Terminate All Sessions"', { timeout: 5000 });
-          await page.click('text="Terminate All Sessions"');
-          console.error('✅ Terminate All Sessions button clicked (by text)');
+          console.error('🔍 URL before link click:', page.url());
+
+          // Click the remind me later link
+          await page.click('a.remind_me_later');
+          console.error('✅ Skip for now link clicked');
 
           // Brief pause to let any immediate redirects happen
           await new Promise(resolve => setTimeout(resolve, 1000));
-          console.error('🔍 URL 1 second after button click:', page.url());
-        } catch (textError) {
-          console.error('⚠️ Text selector failed, trying exact selector from current HTML...');
-          try {
-            // Try the exact selector from the current HTML: a.blue_btn.continue_button#continue_button
-            await page.waitForSelector('a.blue_btn.continue_button#continue_button', { timeout: 5000 });
-            await page.click('a.blue_btn.continue_button#continue_button');
-            console.error('✅ Terminate All Sessions button clicked (by exact class + ID)');
-
-            // Brief pause to let any immediate redirects happen
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            console.error('🔍 URL 1 second after button click:', page.url());
-          } catch (exactError) {
-            console.error('❌ Exact selector failed, trying fallback selectors...');
-            // Try fallback selectors with the correct text
-            const altSelectors = ['text="Terminate All Sessions"', 'a#continue_button', '.blue_btn'];
-            let clicked = false;
-            for (const selector of altSelectors) {
-              try {
-                console.error('🔍 URL before alternative click:', page.url());
-                await page.waitForSelector(selector, { timeout: 3000 });
-                await page.click(selector);
-                console.error(`✅ Clicked using fallback selector: ${selector}`);
-
-                // Brief pause to let any immediate redirects happen
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                console.error('🔍 URL 1 second after alternative click:', page.url());
-                clicked = true;
-                break;
-              } catch (e) {
-                console.error(`❌ Fallback selector failed: ${selector}`);
-              }
-            }
-            if (!clicked) {
-              throw new Error('Could not find or click terminate sessions button');
-            }
-          }
+          console.error('🔍 URL 1 second after link click:', page.url());
+        } catch (clickError) {
+          console.error('❌ Could not click skip for now link');
+          throw new Error('Could not find or click skip for now link');
         }
 
-        console.error('⏳ Waiting for redirect after session termination...');
+        console.error('⏳ Waiting for redirect after skipping session reminder...');
         try {
           await page.waitForURL(
-            (url) => url.href.includes('/portal/academia-academic-services'),
+            (url) => url.href.includes('/portal/academia-academic-services') ||
+              url.href.includes('/announcement/sessions-reminder/next') ||
+              url.hash.includes('#WELCOME'),
             { timeout: 30000 }
           );
         } catch (redirectError) {
           console.error('⚠️ Expected redirect did not occur, checking current URL...');
           const currentUrl = page.url();
-          console.error(`📍 Current URL after button click: ${currentUrl}`);
+          console.error(`📍 Current URL after link click: ${currentUrl}`);
 
           // If we're still on a session limit page, something went wrong
           if (currentUrl.includes('/announcement/') || currentUrl.includes('/preannouncement/')) {
-            throw new Error(`Failed to redirect from session limit page. Current URL: ${currentUrl}`);
+            throw new Error(`Failed to redirect from session reminder page. Current URL: ${currentUrl}`);
           }
 
           // If we're already on dashboard, continue
-          if (currentUrl.includes('/portal/academia-academic-services')) {
+          if (currentUrl.includes('/portal/academia-academic-services') || currentUrl.includes('#WELCOME')) {
             console.error('✅ Already on dashboard, continuing...');
           } else {
-            throw new Error(`Unexpected URL after session termination: ${currentUrl}`);
+            throw new Error(`Unexpected URL after session reminder skip: ${currentUrl}`);
           }
         }
 
-        console.error(`⏱️  Session limit bypass duration: ${Date.now() - sessionLimitStart}ms`);
+        console.error(`⏱️  Session reminder skip duration: ${Date.now() - sessionLimitStart}ms`);
         const afterSessionLimitUrl = page.url();
         console.error(`✅ Redirected to: ${afterSessionLimitUrl}`);
 
-        if (afterSessionLimitUrl.includes('/portal/academia-academic-services')) {
-          console.error('🎉 SESSION LIMIT BYPASSED: Successfully logged in');
+        if (afterSessionLimitUrl.includes('/portal/academia-academic-services') || afterSessionLimitUrl.includes('#WELCOME')) {
+          console.error('🎉 SESSION REMINDER SKIPPED: Successfully logged in');
 
-          // Establish WMS session and navigate to timetable page
-          try {
-            console.error('🔄 STEP 14: Establishing WMS session and navigating to timetable...');
-
-            // 🔐 Wait for authenticated API call (real session validation)
-            await page.waitForResponse(response => {
-              const url = response.url();
-              return (
-                response.status() === 200 &&
-                url.includes('/srm_university/academia-academic-services/') &&
-                response.headers()['set-cookie'] // Must set session cookies
-              );
-            }, { timeout: 15000 });
-
-            console.error('✅ Authenticated session validated');
-
-            // Step 1: Navigate via real route, not hash
-            console.error('🔗 Navigating to My_Time_Table_Attendance via real route');
-            await page.goto(
-              'https://academia.srmist.edu.in/portal/academia-academic-services/My_Time_Table_Attendance',
-              { waitUntil: 'networkidle' }
-            );
-
-            console.error('✅ Navigation completed');
-
-            // Step 2: Explicitly wait for WMS API calls
-            await page.waitForResponse(response => {
-              return (
-                response.url().includes('/wms/') &&
-                response.status() === 200
-              );
-            }, { timeout: 30000 });
-
-            console.error('✅ WMS API calls completed');
-
-            // Step 3: Verify cookie appearance BEFORE extraction
-            await page.waitForFunction(() =>
-              document.cookie.includes('wms-tkp-token'),
-              { timeout: 15000 }
-            );
-
-            console.error('✅ WMS cookies verified');
-
-          } catch (navigationError) {
-            console.error('⚠️  Session establishment or navigation failed, continuing with current page');
-            console.error(`Error: ${navigationError.message}`);
-            // Continue to cookie extraction even if navigation fails
-          }
-
+          // Establish WMS session - only runs when confirmed on dashboard
+          await establishWMSSession(page);
         } else {
-          throw new Error('SESSION_LIMIT_BYPASS_FAILED');
+          throw new Error('SESSION_REMINDER_SKIP_FAILED');
         }
 
       } else if (!currentUrl.includes('/portal/academia-academic-services')) {
@@ -663,87 +590,22 @@ async function performLogin() {
       } else {
         console.error('🎉 LOGIN SUCCESS: Already on portal page');
 
-        // Establish WMS session and navigate to timetable page
-        try {
-          console.error('🔄 STEP 14: Establishing WMS session and navigating to timetable...');
-
-          // 🔐 Wait for authenticated API call (real session validation)
-          await page.waitForResponse(response => {
-            const url = response.url();
-            return (
-              response.status() === 200 &&
-              url.includes('/srm_university/academia-academic-services/') &&
-              response.headers()['set-cookie'] // Must set session cookies
-            );
-          }, { timeout: 15000 });
-
-          console.error('✅ Authenticated session validated');
-
-          // Step 1: Navigate via real route, not hash
-          console.error('🔗 Navigating to My_Time_Table_Attendance via real route');
-          await page.goto(
-            'https://academia.srmist.edu.in/portal/academia-academic-services/My_Time_Table_Attendance',
-            { waitUntil: 'networkidle' }
-          );
-
-          console.error('✅ Navigation completed');
-
-          // Step 2: Explicitly wait for WMS API calls
-          await page.waitForResponse(response => {
-            return (
-              response.url().includes('/wms/') &&
-              response.status() === 200
-            );
-          }, { timeout: 30000 });
-
-          console.error('✅ WMS API calls completed');
-
-          // Step 3: Verify cookie appearance BEFORE extraction
-          await page.waitForFunction(() =>
-            document.cookie.includes('wms-tkp-token'),
-            { timeout: 15000 }
-          );
-
-          console.error('✅ WMS cookies verified');
-
-        } catch (navigationError) {
-          console.error('⚠️  Session establishment or navigation failed, continuing with current page');
-          console.error(`Error: ${navigationError.message}`);
-          // Continue to cookie extraction even if navigation fails
-        }
+        // Establish WMS session - only runs when confirmed on dashboard
+        await establishWMSSession(page);
       }
     }
 
     console.error('');
 
-    console.error('🔄 STEP 15: Final WMS stabilization and cookie extraction...');
+    // Only proceed to cookie extraction if WMS session was established
+    const currentUrl = page.url();
+    if (!currentUrl.includes('/portal/academia-academic-services') && !currentUrl.includes('#WELCOME')) {
+      console.error('❌ Cannot proceed to cookie extraction: Not on dashboard page');
+      throw new Error('NOT_ON_DASHBOARD_PAGE');
+    }
+
+    console.error('🔄 STEP 15: Extracting session cookies...');
     const cookieExtractStart = Date.now();
-
-    // Wait for successful /wms/ network response
-    console.error('⏳ Waiting for WMS API response...');
-    await page.waitForResponse(response => {
-      return (
-        response.url().includes('/wms/') &&
-        response.status() === 200
-      );
-    }, { timeout: 30000 });
-
-    console.error('✅ WMS API response received');
-
-    // Wait until document.cookie contains wms-tkp-token
-    console.error('⏳ Waiting for wms-tkp-token in document.cookie...');
-    await page.waitForFunction(() =>
-      document.cookie.includes('wms-tkp-token'),
-      { timeout: 15000 }
-    );
-
-    console.error('✅ wms-tkp-token found in document.cookie');
-
-    // Short stabilization delay after cookie appears
-    console.error('⏳ Stabilization delay (1 second)...');
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    console.error('🔄 STEP 16: Extracting session cookies...');
 
     // Extract all cookies from browser context
     const cookies = await context.cookies();
