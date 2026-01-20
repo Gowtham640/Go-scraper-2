@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"srm-academia-scraper/config"
 	"srm-academia-scraper/handlers"
+	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/middleware"
 	"srm-academia-scraper/storage"
+	"srm-academia-scraper/worker"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -32,6 +34,15 @@ func main() {
 
 	logger.Info("supabase_init", "Supabase client initialized", nil)
 
+	// Start background worker
+	jobWorker := worker.NewWorker(db)
+	jobWorker.Start()
+	logger.Info("worker_init", "Background worker started", nil)
+
+	// Create job manager
+	jobManager := jobs.NewManager(db, jobWorker)
+	logger.Info("job_manager_init", "Job manager initialized", nil)
+
 	// Create rate limiter (1 request per second per IP)
 	rateLimiter := middleware.NewRateLimiter(rate.Limit(1), 3)
 	rateLimiter.CleanupOldLimiters(10 * time.Minute)
@@ -41,10 +52,10 @@ func main() {
 
 	// Register routes
 	mux.HandleFunc("/login", handlers.LoginHandler(db))
-	mux.HandleFunc("/user", handlers.UserHandler(db))
-	mux.HandleFunc("/courses", handlers.CoursesHandler(db))
-	mux.HandleFunc("/timetable", handlers.TimetableHandler(db))
-	mux.HandleFunc("/calendar", handlers.CalendarHandler(db))
+	mux.HandleFunc("/user", handlers.UserHandler(jobManager))
+	mux.HandleFunc("/courses", handlers.CoursesHandler(jobManager))
+	mux.HandleFunc("/timetable", handlers.TimetableHandler(jobManager))
+	mux.HandleFunc("/calendar", handlers.CalendarHandler(jobManager))
 	mux.HandleFunc("/health", handlers.HealthHandler())
 
 	// Apply middleware

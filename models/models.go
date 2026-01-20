@@ -157,3 +157,40 @@ type CaptchaResponse struct {
 		ImageBytes string `json:"image_bytes"`
 	} `json:"captcha"`
 }
+
+// Job represents a background job in the system
+type Job struct {
+	ID            string    `json:"id"`
+	UserID        string    `json:"user_id"`
+	JobType       string    `json:"job_type"`       // 'login' or 'fetch'
+	DataType      string    `json:"data_type"`      // 'auth' for login, 'courses'/'timetable'/'calendar'/'user' for fetch
+	Status        string    `json:"status"`         // 'pending', 'running', 'done', 'failed'
+	Priority      int       `json:"priority"`
+	CreatedAt     time.Time `json:"created_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	RetryCount    int       `json:"retry_count"`
+	FailureReason *string   `json:"failure_reason,omitempty"`
+	// Credentials for login jobs (not stored in DB, passed in memory)
+	Email    string `json:"-"` // JSON omit
+	Password string `json:"-"` // JSON omit
+}
+
+// JobCreateRequest represents the data needed to create a job
+type JobCreateRequest struct {
+	UserID             string
+	JobType            string
+	DataType           string
+	Priority           int
+	Email              string   // For login jobs
+	Password           string   // For login jobs
+	RequestedDataTypes []string // For login jobs - data types to fetch after login
+}
+
+// WorkerLoginRequest represents a login job with credentials for the worker
+type WorkerLoginRequest struct {
+	UserID             string
+	Email              string
+	Password           string
+	Priority           int
+	RequestedDataTypes []string
+}

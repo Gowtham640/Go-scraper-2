@@ -3,72 +3,144 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
-	"srm-academia-scraper/scraper"
-	"srm-academia-scraper/storage"
+	"time"
 )
 
 // TimetableHandler handles GET /timetable requests
-func TimetableHandler(db *storage.SupabaseClient) http.HandlerFunc {
+func TimetableHandler(jobManager *jobs.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// Get headers
+		// Extract credentials from request body
+		var req models.LoginRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			logger.Error("timetable_handler", "Failed to parse request body", err, nil)
+			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+			return
+		}
+
 		userID := r.Header.Get("X-User-Id")
-		email := r.Header.Get("X-Email")
-		password := r.Header.Get("X-Password")
+		email := req.Account
+		password := req.Password
+		dataType := "timetable"
 
 		if userID == "" || email == "" {
-			logger.Warn("timetable_handler", "Missing required headers", map[string]interface{}{
+			logger.Warn("timetable_handler", "Missing required fields", map[string]interface{}{
 				"user_id": userID,
 				"email":   email,
 			})
-			json.NewEncoder(w).Encode(models.SuccessResponse{Success: false})
+			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 			return
 		}
 
 		logger.InfoWithUser(email, "timetable_handler", "Processing timetable request", nil)
 
+		// Step 1: Check token validity first (critical for data freshness)
+		tokenData, tokenErr := jobManager.GetToken(userID)
 
-		// Get user batch - first try from users table, default to batch 2
-		userBatch := "2" // Default batch
-		if batchFromDB, err := db.GetUserBatch(userID); err == nil && batchFromDB != "" {
-			userBatch = batchFromDB
-			logger.InfoWithUser(email, "timetable_handler", "Using batch from users table", map[string]interface{}{"batch": userBatch})
-		} else {
-			logger.InfoWithUser(email, "timetable_handler", "Using default batch 2", map[string]interface{}{"batch": userBatch})
+		// Step 2: Check cache freshness only if we have a valid token
+		if tokenErr == nil {
+			_, updatedAt, cacheErr := jobManager.GetUserCacheWithTimestamp(userID, dataType)
+			if cacheErr == nil && updatedAt != nil {
+				// Cache exists and is fresh (< 24 hours) AND we have valid token
+				if time.Since(*updatedAt) < 24*time.Hour {
+					logger.InfoWithUser(email, "timetable_handler", "Fresh cache found with valid token, returning success", nil)
+					json.NewEncoder(w).Encode(map[string]string{"response": "success"})
+					return
+				}
+			}
 		}
 
-		// Fetch courses data (uses cache if available, otherwise fetches from SRM)
-		coursesData, err := FetchCoursesData(db, userID, email, password)
-		if err != nil {
-			logger.ErrorWithUser(email, "timetable_handler", "Failed to fetch courses data", err, nil)
-			json.NewEncoder(w).Encode(models.SuccessResponse{Success: false})
+		// Step 3: No fresh cache or no valid token - need to create job
+		if tokenErr != nil {
+			// No token exists - create login job (highest priority for new users)
+			logger.InfoWithUser(email, "timetable_handler", "No token found, enqueuing login job", nil)
+
+			jobReq := models.JobCreateRequest{
+				UserID:             userID,
+				JobType:            "login",
+				DataType:           "auth",
+				Priority:           100, // New user login
+				Email:              email,
+				Password:           password,
+				RequestedDataTypes: []string{dataType}, // Only fetch the requested data type
+			}
+
+			err := jobManager.EnqueueJob(jobReq)
+			if err != nil {
+				if err.Error() == "queue_full" {
+					logger.WarnWithUser(email, "timetable_handler", "Queue full", nil)
+					json.NewEncoder(w).Encode(map[string]string{"response": "queue_full"})
+				} else {
+					logger.ErrorWithUser(email, "timetable_handler", "Failed to enqueue login job", err, nil)
+					json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+				}
+				return
+			}
+
+			json.NewEncoder(w).Encode(map[string]string{"response": "success"})
 			return
 		}
 
-		// Generate timetable
-		timetableData, err := scraper.GenerateTimetable(coursesData.Courses, userBatch)
-		if err != nil {
-			logger.ErrorWithUser(email, "timetable_handler", "Failed to generate timetable", err, nil)
-			json.NewEncoder(w).Encode(models.SuccessResponse{Success: false})
+		// Token exists - check expiry
+		isExpired := time.Now().After(tokenData.ExpiryTimestamp)
+
+		if isExpired {
+			// Token expired - check if password is provided for login retry
+			if password == "" {
+				logger.WarnWithUser(email, "timetable_handler", "Token expired but no password provided", nil)
+				json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+				return
+			}
+
+			// Create login job (medium priority)
+			logger.InfoWithUser(email, "timetable_handler", "Token expired, enqueuing login job", nil)
+
+			jobReq := models.JobCreateRequest{
+				UserID:   userID,
+				JobType:  "login",
+				DataType: "auth",
+				Priority: 50, // Token refresh login
+				Email:    email,
+				Password: password,
+			}
+
+			err := jobManager.EnqueueJob(jobReq)
+			if err != nil {
+				if err.Error() == "queue_full" {
+					logger.WarnWithUser(email, "timetable_handler", "Queue full", nil)
+					json.NewEncoder(w).Encode(map[string]string{"response": "queue_full"})
+				} else {
+					logger.ErrorWithUser(email, "timetable_handler", "Failed to enqueue login job", err, nil)
+					json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+				}
+				return
+			}
+
+			json.NewEncoder(w).Encode(map[string]string{"response": "success"})
 			return
 		}
 
-		// Set registration number and batch
-		timetableData.RegNumber = coursesData.RegNumber
-		timetableData.Batch = userBatch
+		// Token is valid but no fresh cache - create fetch job
+		logger.InfoWithUser(email, "timetable_handler", "Token valid but no fresh cache, enqueuing fetch job", nil)
 
-		// Store timetable data in user_cache (expires in 7 days)
-		err = db.UpsertUserCache(userID, "timetable", timetableData, 7*24)
+		jobReq := models.JobCreateRequest{
+			UserID:   userID,
+			JobType:  "fetch",
+			DataType: dataType,
+			Priority: 10, // Fetch job
+		}
+
+		err := jobManager.EnqueueJob(jobReq)
 		if err != nil {
-			logger.ErrorWithUser(email, "timetable_handler", "Failed to store timetable", err, nil)
-			json.NewEncoder(w).Encode(models.SuccessResponse{Success: false})
+			logger.ErrorWithUser(email, "timetable_handler", "Failed to enqueue fetch job", err, nil)
+			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 			return
 		}
 
-		logger.InfoWithUser(email, "timetable_handler", "Timetable processed and stored successfully", nil)
-		json.NewEncoder(w).Encode(timetableData)
+		json.NewEncoder(w).Encode(map[string]string{"response": "success"})
 	}
 }

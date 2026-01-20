@@ -101,7 +101,7 @@ async function performLogin() {
 
     // Launch browser
     browser = await chromium.launch({
-      headless: true,
+      headless: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -493,13 +493,14 @@ async function performLogin() {
         const isLoginUrl = afterSessionLimitUrl.includes('/login') || afterSessionLimitUrl.includes('redirectLogin') || afterSessionLimitUrl.includes('signin');
         const isAccountsUrl = afterSessionLimitUrl.includes('/accounts/');
         const isRedirectFromLoginUrl = afterSessionLimitUrl.includes('redirectFromLogin');
-        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}, RedirectFromLogin: ${isRedirectFromLoginUrl}`);
+        const isRootDomain = afterSessionLimitUrl === 'https://academia.srmist.edu.in/';
+        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}, RedirectFromLogin: ${isRedirectFromLoginUrl}, RootDomain: ${isRootDomain}`);
 
-        if (isPortalUrl || isWelcomeUrl || isLoginUrl || isAccountsUrl) {
+        if (isPortalUrl || isWelcomeUrl || isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl || isRootDomain) {
           console.error('🎉 SESSION LIMIT BYPASSED: Successfully redirected');
 
           // For login/redirect URLs, we need to wait for the actual dashboard redirect
-          if (isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl) {
+          if (isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl || isRootDomain) {
             console.error('⏳ Waiting for final dashboard redirect...');
             try {
               await page.waitForURL(
