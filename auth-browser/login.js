@@ -96,22 +96,30 @@ async function performLogin() {
   let page = null;
 
   try {
-    console.error('🔄 STEP 2: Launching Playwright browser...');
+    console.error('🔄 STEP 2: Connecting to browser...');
     const step2Start = Date.now();
 
-    // Launch browser
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu'
-      ]
-    });
+    if (useExistingBrowser && browserWSEndpoint) {
+      console.error('🔗 Connecting to existing browser via WebSocket...');
+      browser = await chromium.connect(browserWSEndpoint);
+      console.error('✅ Connected to existing browser successfully');
+    } else {
+      console.error('🚀 Launching new browser...');
+      // Launch browser
+      browser = await chromium.launch({
+        headless: false,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu'
+        ]
+      });
+      console.error('✅ New browser launched successfully');
+    }
 
     console.error('✅ Browser launched successfully');
     console.error(`⏱️  Step 2 duration: ${Date.now() - step2Start}ms`);
@@ -493,13 +501,14 @@ async function performLogin() {
         const isLoginUrl = afterSessionLimitUrl.includes('/login') || afterSessionLimitUrl.includes('redirectLogin') || afterSessionLimitUrl.includes('signin');
         const isAccountsUrl = afterSessionLimitUrl.includes('/accounts/');
         const isRedirectFromLoginUrl = afterSessionLimitUrl.includes('redirectFromLogin');
-        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}, RedirectFromLogin: ${isRedirectFromLoginUrl}`);
+        const isRootDomain = afterSessionLimitUrl === 'https://academia.srmist.edu.in/';
+        console.error(`🔍 Success check - Portal: ${isPortalUrl}, Welcome: ${isWelcomeUrl}, Login: ${isLoginUrl}, Accounts: ${isAccountsUrl}, RedirectFromLogin: ${isRedirectFromLoginUrl}, RootDomain: ${isRootDomain}`);
 
-        if (isPortalUrl || isWelcomeUrl || isLoginUrl || isAccountsUrl) {
+        if (isPortalUrl || isWelcomeUrl || isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl || isRootDomain) {
           console.error('🎉 SESSION LIMIT BYPASSED: Successfully redirected');
 
           // For login/redirect URLs, we need to wait for the actual dashboard redirect
-          if (isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl) {
+          if (isLoginUrl || isAccountsUrl || isRedirectFromLoginUrl || isRootDomain) {
             console.error('⏳ Waiting for final dashboard redirect...');
             try {
               await page.waitForURL(
