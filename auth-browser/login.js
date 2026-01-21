@@ -2,6 +2,10 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
+// Optional controls for reusing an existing browser instance
+const useExistingBrowser = process.env.USE_EXISTING_BROWSER === 'true';
+const browserWSEndpoint = process.env.BROWSER_WS_ENDPOINT;
+
 // Function to establish WMS session - ONLY runs when confirmed on dashboard
 async function establishWMSSession(page) {
   const currentUrl = page.url();

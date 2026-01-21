@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"os"
 	"srm-academia-scraper/auth"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
@@ -118,8 +119,8 @@ func (w *Worker) processNextJob() {
 			newStatus = "pending"
 		} else {
 			logger.Info("worker_process", "Job failed permanently", map[string]interface{}{
-				"job_id":        job.ID,
-				"retry_count":   job.RetryCount,
+				"job_id":         job.ID,
+				"retry_count":    job.RetryCount,
 				"failure_reason": failureReason,
 			})
 			newStatus = "failed"
@@ -159,7 +160,7 @@ func (w *Worker) processLoginRequest(req models.WorkerLoginRequest) {
 		}
 	} else {
 		logger.Error("process_login_request", "Login failed", nil, map[string]interface{}{
-			"user_id":       req.UserID,
+			"user_id":        req.UserID,
 			"failure_reason": failureReason,
 		})
 	}
@@ -244,6 +245,10 @@ func (w *Worker) executeFetchJob(job *models.Job) (bool, *string) {
 		return w.fetchTimetable(job, tokenData)
 	case "calendar":
 		return w.fetchCalendar(job, tokenData)
+	case "attendance":
+		return w.fetchAttendance(job, tokenData)
+	case "marks":
+		return w.fetchMarks(job, tokenData)
 	case "user":
 		return w.fetchUserInfo(job, tokenData)
 	default:
@@ -353,8 +358,8 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 
 		// Try to fetch user data first
 		userJob := &models.Job{
-			ID:     job.ID + "_user", // Temporary ID for user fetch
-			UserID: job.UserID,
+			ID:       job.ID + "_user", // Temporary ID for user fetch
+			UserID:   job.UserID,
 			DataType: "user",
 		}
 		success, failureMsg := w.fetchUserInfo(userJob, tokenData)
@@ -384,8 +389,8 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 
 		// Fetch courses data first
 		coursesJob := &models.Job{
-			ID:     job.ID + "_courses", // Temporary ID for courses fetch
-			UserID: job.UserID,
+			ID:       job.ID + "_courses", // Temporary ID for courses fetch
+			UserID:   job.UserID,
 			DataType: "courses",
 		}
 		success, failureMsg := w.fetchCourses(coursesJob, tokenData)
@@ -497,8 +502,274 @@ func (w *Worker) fetchCalendar(job *models.Job, tokenData *models.TokenData) (bo
 	}
 
 	logger.Info("fetch_calendar", "Calendar fetched successfully", map[string]interface{}{
-		"job_id": job.ID,
+		"job_id":  job.ID,
 		"user_id": job.UserID,
+	})
+
+	return true, nil
+}
+
+// fetchAttendance fetches attendance data
+func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (bool, *string) {
+	logger.Info("fetch_attendance", "Starting attendance fetch process", map[string]interface{}{
+		"job_id":   job.ID,
+		"user_id":  job.UserID,
+		"endpoint": scraper.AttendanceURL,
+	})
+
+	// Apply rate limiting
+	logger.Info("fetch_attendance", "Applying rate limit before request", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+		"delay":   "1 second",
+	})
+	scraper.RateLimit(1 * time.Second)
+
+	// Create HTTP client
+	logger.Info("fetch_attendance", "Creating HTTP client", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+	})
+	httpClient := scraper.NewHTTPClient()
+
+	// Fetch HTML from attendance endpoint
+	logger.Info("fetch_attendance", "Making HTTP request to attendance endpoint", map[string]interface{}{
+		"job_id":      job.ID,
+		"user_id":     job.UserID,
+		"url":         scraper.AttendanceURL,
+		"has_cookies": tokenData != nil && tokenData.Tokens != "",
+	})
+	htmlContent, err := httpClient.GetWithCookies(scraper.AttendanceURL, tokenData.Tokens)
+
+	// Check for authentication failure
+	if err != nil && w.isAuthFailure(err) {
+		logger.Warn("fetch_attendance", "Authentication failure detected, triggering login", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"error":   err.Error(),
+		})
+
+		// Enqueue login job
+		jobReq := models.JobCreateRequest{
+			UserID:   job.UserID,
+			JobType:  "login",
+			DataType: "auth",
+			Priority: 50, // Token refresh
+		}
+		w.db.EnqueueJob(jobReq) // Ignore error
+
+		failureMsg := "Authentication failed - login job enqueued"
+		logger.Info("fetch_attendance", failureMsg, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	// Check for general HTTP errors
+	if err != nil {
+		failureMsg := fmt.Sprintf("HTTP request failed: %v", err)
+		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"url":     scraper.AttendanceURL,
+		})
+		return false, &failureMsg
+	}
+
+	// Log successful fetch
+	logger.Info("fetch_attendance", "HTML content successfully fetched", map[string]interface{}{
+		"job_id":       job.ID,
+		"user_id":      job.UserID,
+		"content_size": len(htmlContent),
+		"url":          scraper.AttendanceURL,
+	})
+
+	// Save HTML content to attendance.html file
+	logger.Info("fetch_attendance", "Saving HTML content to attendance.html file", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+		"file":    "attendance.html",
+	})
+	err = os.WriteFile("attendance.html", htmlContent, 0644)
+	if err != nil {
+		logger.Error("fetch_attendance", "Failed to save HTML to file", err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"file":    "attendance.html",
+		})
+		// Continue even if file save fails
+	} else {
+		logger.Info("fetch_attendance", "HTML content successfully saved to file", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"file":    "attendance.html",
+			"bytes":   len(htmlContent),
+		})
+	}
+
+	decodedHTML, err := scraper.ExtractSanitizedHTML(string(htmlContent))
+	if err != nil {
+		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v", err)
+		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	attendanceEntries, err := scraper.ParseAttendance(decodedHTML)
+	if err != nil {
+		failureMsg := fmt.Sprintf("Failed to parse attendance data: %v", err)
+		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	attendanceData := map[string]interface{}{
+		"entries":    attendanceEntries,
+		"url":        scraper.AttendanceURL,
+		"fetched_at": time.Now().Format(time.RFC3339),
+	}
+
+	// Store in database cache
+	logger.Info("fetch_attendance", "Storing attendance data in cache", map[string]interface{}{
+		"job_id":    job.ID,
+		"user_id":   job.UserID,
+		"cache_ttl": 24,
+		"data_type": "attendance",
+	})
+	err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 24)
+	if err != nil {
+		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
+		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	logger.Info("fetch_attendance", "Attendance fetch process completed successfully", map[string]interface{}{
+		"job_id":     job.ID,
+		"user_id":    job.UserID,
+		"cached":     true,
+		"file_saved": true,
+	})
+
+	return true, nil
+}
+
+// fetchMarks fetches marks data
+func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool, *string) {
+	logger.Info("fetch_marks", "Fetching marks", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+	})
+
+	// Apply rate limiting
+	logger.Info("fetch_marks", "Applying rate limit before request", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+		"delay":   "1 second",
+	})
+	scraper.RateLimit(1 * time.Second)
+
+	logger.Info("fetch_marks", "Creating HTTP client", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+	})
+	httpClient := scraper.NewHTTPClient()
+
+	logger.Info("fetch_marks", "Making HTTP request to attendance endpoint", map[string]interface{}{
+		"job_id":      job.ID,
+		"user_id":     job.UserID,
+		"url":         scraper.AttendanceURL,
+		"has_cookies": tokenData != nil && tokenData.Tokens != "",
+	})
+	htmlContent, err := httpClient.GetWithCookies(scraper.AttendanceURL, tokenData.Tokens)
+
+	// Check for auth failure
+	if err != nil && w.isAuthFailure(err) {
+		logger.Info("fetch_marks", "Auth failure detected, will trigger login", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		// Enqueue login job
+		jobReq := models.JobCreateRequest{
+			UserID:   job.UserID,
+			JobType:  "login",
+			DataType: "auth",
+			Priority: 50, // Token refresh
+		}
+		w.db.EnqueueJob(jobReq) // Ignore error
+		failureMsg := "Authentication failed"
+		return false, &failureMsg
+	}
+
+	if err != nil {
+		failureMsg := fmt.Sprintf("HTTP request failed: %v", err)
+		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"url":     scraper.AttendanceURL,
+		})
+		return false, &failureMsg
+	}
+
+	logger.Info("fetch_marks", "HTML content successfully fetched", map[string]interface{}{
+		"job_id":       job.ID,
+		"user_id":      job.UserID,
+		"content_size": len(htmlContent),
+		"url":          scraper.AttendanceURL,
+	})
+
+	decodedHTML, err := scraper.ExtractSanitizedHTML(string(htmlContent))
+	if err != nil {
+		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v", err)
+		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	marksEntries, err := scraper.ParseMarks(decodedHTML)
+	if err != nil {
+		failureMsg := fmt.Sprintf("Failed to parse marks data: %v", err)
+		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	marksData := map[string]interface{}{
+		"entries":    marksEntries,
+		"url":        scraper.AttendanceURL,
+		"fetched_at": time.Now().Format(time.RFC3339),
+	}
+
+	logger.Info("fetch_marks", "Storing marks data in cache", map[string]interface{}{
+		"job_id":    job.ID,
+		"user_id":   job.UserID,
+		"data_type": "marks",
+	})
+	err = w.db.UpsertUserCache(job.UserID, "marks", marksData, 24)
+	if err != nil {
+		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
+		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
+	logger.Info("fetch_marks", "Marks fetch process completed successfully", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+		"cached":  true,
 	})
 
 	return true, nil

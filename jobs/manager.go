@@ -1,11 +1,11 @@
 package jobs
 
 import (
-	"time"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
+	"time"
 )
 
 // Manager coordinates job creation between handlers and worker
@@ -30,6 +30,11 @@ func (m *Manager) GetUserCacheWithTimestamp(userID, dataType string) (interface{
 // GetToken retrieves token data
 func (m *Manager) GetToken(userID string) (*models.TokenData, error) {
 	return m.db.GetToken(userID)
+}
+
+// GetUserCache retrieves cached data for a user and data type
+func (m *Manager) GetUserCache(userID, dataType string) (interface{}, error) {
+	return m.db.GetUserCache(userID, dataType)
 }
 
 // EnqueueJob handles job creation and coordinates with worker for login jobs
