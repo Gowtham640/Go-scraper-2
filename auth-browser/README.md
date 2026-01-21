@@ -12,7 +12,7 @@ When SRM portal authentication endpoints are unavailable, this service performs 
 # Set environment variables
 export SRM_EMAIL="student@srmist.edu.in"
 export SRM_PASSWORD="password123"
-export TIMEOUT_SECONDS="30"
+export TIMEOUT_SECONDS="40"
 
 # Run login
 cd auth-browser
