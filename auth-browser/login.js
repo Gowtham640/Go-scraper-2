@@ -96,22 +96,30 @@ async function performLogin() {
   let page = null;
 
   try {
-    console.error('🔄 STEP 2: Launching Playwright browser...');
+    console.error('🔄 STEP 2: Connecting to browser...');
     const step2Start = Date.now();
 
-    // Launch browser
-    browser = await chromium.launch({
-      headless: false,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu'
-      ]
-    });
+    if (useExistingBrowser && browserWSEndpoint) {
+      console.error('🔗 Connecting to existing browser via WebSocket...');
+      browser = await chromium.connect(browserWSEndpoint);
+      console.error('✅ Connected to existing browser successfully');
+    } else {
+      console.error('🚀 Launching new browser...');
+      // Launch browser
+      browser = await chromium.launch({
+        headless: false,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu'
+        ]
+      });
+      console.error('✅ New browser launched successfully');
+    }
 
     console.error('✅ Browser launched successfully');
     console.error(`⏱️  Step 2 duration: ${Date.now() - step2Start}ms`);

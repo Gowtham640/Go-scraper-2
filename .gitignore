@@ -42,11 +42,6 @@ go.work
 .DS_Store
 Thumbs.db
 
-# Build output
-/scraper
-/scraper.exe
-/build/
-/dist/
 
 # Logs
 *.log

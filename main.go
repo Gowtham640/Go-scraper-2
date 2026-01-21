@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"srm-academia-scraper/config"
 	"srm-academia-scraper/handlers"
 	"srm-academia-scraper/jobs"
@@ -10,10 +12,62 @@ import (
 	"srm-academia-scraper/middleware"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
+	"sync"
+	"syscall"
 	"time"
 
+	"github.com/playwright-community/playwright-go"
 	"golang.org/x/time/rate"
 )
+
+// Global browser instance and semaphore
+var (
+	globalBrowser     *playwright.Browser
+	globalBrowserOnce sync.Once
+	loginSemaphore    = make(chan struct{}, 3) // Capacity 3 for concurrent contexts
+)
+
+// getGlobalBrowser returns the singleton browser instance, launching it if needed
+func getGlobalBrowser() *playwright.Browser {
+	globalBrowserOnce.Do(func() {
+		pw, err := playwright.Run()
+		if err != nil {
+			logger.Fatal("browser_init", "Failed to start Playwright", err)
+		}
+
+		browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+			Headless: playwright.Bool(false),
+			Args: []string{
+				"--no-sandbox",
+				"--disable-setuid-sandbox",
+				"--disable-dev-shm-usage",
+				"--disable-accelerated-2d-canvas",
+				"--no-first-run",
+				"--no-zygote",
+				"--disable-gpu",
+			},
+		})
+		if err != nil {
+			logger.Fatal("browser_init", "Failed to launch browser", err)
+		}
+
+		globalBrowser = browser
+		logger.Info("browser_init", "Global browser instance launched", nil)
+	})
+	return globalBrowser
+}
+
+// shutdownGlobalBrowser closes the global browser instance
+func shutdownGlobalBrowser() {
+	if globalBrowser != nil {
+		if err := globalBrowser.Close(); err != nil {
+			logger.Error("browser_shutdown", "Failed to close global browser", err, nil)
+		} else {
+			logger.Info("browser_shutdown", "Global browser instance closed", nil)
+		}
+		globalBrowser = nil
+	}
+}
 
 func main() {
 	// Load configuration
