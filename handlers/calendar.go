@@ -14,17 +14,20 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// Extract credentials from request body
-		var req models.LoginRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			logger.Error("calendar_handler", "Failed to parse request body", err, nil)
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
-			return
-		}
-
 		userID := r.Header.Get("X-User-Id")
-		email := req.Account
-		password := req.Password
+		email := r.Header.Get("X-Email")
+		password := r.Header.Get("X-Password")
+
+		if r.Method != http.MethodGet {
+			var req models.LoginRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				logger.Error("calendar_handler", "Failed to parse request body", err, nil)
+				json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+				return
+			}
+			email = req.Account
+			password = req.Password
+		}
 		dataType := "calendar"
 
 		if userID == "" || email == "" {

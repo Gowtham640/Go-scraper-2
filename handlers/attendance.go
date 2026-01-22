@@ -71,18 +71,21 @@ func AttendanceHandler(jobManager *jobs.Manager) http.HandlerFunc {
 			return
 		}
 
-		// Extract credentials from request body
-		var req models.LoginRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			logger.Error("attendance_handler", "Failed to parse request body", err, map[string]interface{}{
-				"user_id": userID,
-			})
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
-			return
-		}
+		email := r.Header.Get("X-Email")
+		password := r.Header.Get("X-Password")
 
-		email := req.Account
-		password := req.Password
+		if r.Method != http.MethodGet {
+			var req models.LoginRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				logger.Error("attendance_handler", "Failed to parse request body", err, map[string]interface{}{
+					"user_id": userID,
+				})
+				json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+				return
+			}
+			email = req.Account
+			password = req.Password
+		}
 
 		if email == "" {
 			logger.Warn("attendance_handler", "Missing email in request", map[string]interface{}{

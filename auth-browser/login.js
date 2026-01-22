@@ -1,4 +1,4 @@
-﻿const { chromium } = require('playwright');
+const { chromium } = require('playwright');
 const http = require('http');
 
 const PORT = parseInt(process.env.AUTH_SERVICE_PORT || '3001', 10);

@@ -183,15 +183,6 @@ func (s *SessionManager) LoginAndCreateUser(email, password string) (string, err
 		return "", err
 	}
 
-	// Fetch and store user profile data in public.users
-	_, err = s.FetchUserInfo(userID, email)
-	if err != nil {
-		logger.WarnWithUser(email, "session_create_user", "Failed to fetch user info during login", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// Continue anyway - user can still use the system, profile will be fetched later
-	}
-
 	logger.InfoWithUser(email, "session_create_user", "User created and logged in successfully", map[string]interface{}{
 		"user_id": userID,
 	})

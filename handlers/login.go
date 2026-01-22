@@ -67,19 +67,19 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			"user_id": userID,
 		})
 
-		// After successful login, enqueue fetch jobs for initial data population
-		err = db.EnqueueDependentFetchJobs(userID)
-		if err != nil {
-			logger.WarnWithUser(req.Account, "login_handler", "Failed to enqueue dependent jobs", map[string]interface{}{
-				"error": err.Error(),
-			})
-			// Don't fail the login if job enqueueing fails
-		}
-
 		// Return success with user ID
 		json.NewEncoder(w).Encode(models.LoginResponse{
 			Success: true,
 			UserId:  userID,
 		})
+
+		// Fetch user info asynchronously (kept around for later caching)
+		go func(email string) {
+			if _, err := sessionManager.FetchUserInfo(userID, email); err != nil {
+				logger.WarnWithUser(email, "login_handler", "Async user info fetch failed", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}(req.Account)
 	}
 }

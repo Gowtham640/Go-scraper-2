@@ -825,7 +825,7 @@ func (w *Worker) fetchUserInfo(job *models.Job, tokenData *models.TokenData) (bo
 	}
 
 	// Store in users table
-	err = w.db.UpsertUser(job.UserID, "", userInfo) // Email not needed for update
+	err = w.db.UpsertUser(job.UserID, tokenData.Email, userInfo)
 	if err != nil {
 		failureMsg := fmt.Sprintf("User storage failed: %v", err)
 		return false, &failureMsg
