@@ -15,6 +15,7 @@ const (
 	SRMBaseURL    = "https://academia.srmist.edu.in"
 	TimeTableURL  = SRMBaseURL + "/srm_university/academia-academic-services/page/My_Time_Table_2023_24"
 	CalendarURL   = SRMBaseURL + "/srm_university/academia-academic-services/page/Academic_Planner_2025_26_EVEN"
+	AttendanceURL = SRMBaseURL + "/srm_university/academia-academic-services/page/My_Attendance"
 )
 
 // HTTPClient wraps http.Client with SRM-specific headers

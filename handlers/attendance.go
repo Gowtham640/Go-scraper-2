@@ -9,37 +9,93 @@ import (
 	"time"
 )
 
-// CalendarHandler handles GET /calendar requests
-func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
+// AttendanceHandler handles GET /attendance requests
+func AttendanceHandler(jobManager *jobs.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		userID := r.Header.Get("X-User-Id")
+		dataType := "attendance"
+
+		if userID == "" {
+			logger.Warn("attendance_handler", "Missing user id header", nil)
+			json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "missing_user_id"})
+			return
+		}
+
+		if r.Method == http.MethodGet {
+			logger.Info("attendance_handler", "GET attendance cache requested", map[string]interface{}{
+				"user_id": userID,
+			})
+
+			data, err := jobManager.GetUserCache(userID, dataType)
+			if err != nil {
+				logger.Warn("attendance_handler", "Cached attendance not found, enqueuing fetch", map[string]interface{}{
+					"user_id": userID,
+					"error":   err.Error(),
+				})
+
+				jobReq := models.JobCreateRequest{
+					UserID:   userID,
+					JobType:  "fetch",
+					DataType: dataType,
+					Priority: 10,
+				}
+				if enqueueErr := jobManager.EnqueueJob(jobReq); enqueueErr != nil {
+					logger.Error("attendance_handler", "Failed to enqueue attendance fetch job", enqueueErr, map[string]interface{}{
+						"user_id":   userID,
+						"data_type": dataType,
+					})
+					json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "enqueue_failed"})
+					return
+				}
+
+				json.NewEncoder(w).Encode(map[string]string{"response": "queued"})
+				return
+			}
+
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"response": "success",
+				"data":     data,
+			})
+			return
+		}
+
+		if r.Method != http.MethodPost {
+			logger.Warn("attendance_handler", "Method not allowed", map[string]interface{}{
+				"user_id": userID,
+				"method":  r.Method,
+			})
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "method_not_allowed"})
+			return
+		}
+
 		email := r.Header.Get("X-Email")
 		password := r.Header.Get("X-Password")
 
 		if r.Method != http.MethodGet {
 			var req models.LoginRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				logger.Error("calendar_handler", "Failed to parse request body", err, nil)
+				logger.Error("attendance_handler", "Failed to parse request body", err, map[string]interface{}{
+					"user_id": userID,
+				})
 				json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 				return
 			}
 			email = req.Account
 			password = req.Password
 		}
-		dataType := "calendar"
 
-		if userID == "" || email == "" {
-			logger.Warn("calendar_handler", "Missing required fields", map[string]interface{}{
+		if email == "" {
+			logger.Warn("attendance_handler", "Missing email in request", map[string]interface{}{
 				"user_id": userID,
-				"email":   email,
 			})
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+			json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "missing_email"})
 			return
 		}
 
-		logger.InfoWithUser(email, "calendar_handler", "Processing calendar request", nil)
+		logger.InfoWithUser(email, "attendance_handler", "Processing attendance request", nil)
 
 		// Step 1: Check token validity first (critical for data freshness)
 		tokenData, tokenErr := jobManager.GetToken(userID)
@@ -50,7 +106,7 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 			if cacheErr == nil && updatedAt != nil {
 				// Cache exists and is fresh (< 24 hours) AND we have valid token
 				if time.Since(*updatedAt) < 24*time.Hour {
-					logger.InfoWithUser(email, "calendar_handler", "Fresh cache found with valid token, returning success", nil)
+					logger.InfoWithUser(email, "attendance_handler", "Fresh cache found with valid token, returning success", nil)
 					json.NewEncoder(w).Encode(map[string]string{"response": "success"})
 					return
 				}
@@ -60,7 +116,7 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 		// Step 3: No fresh cache or no valid token - need to create job
 		if tokenErr != nil {
 			// No token exists - create login job (highest priority for new users)
-			logger.InfoWithUser(email, "calendar_handler", "No token found, enqueuing login job", nil)
+			logger.InfoWithUser(email, "attendance_handler", "No token found, enqueuing login job", nil)
 
 			jobReq := models.JobCreateRequest{
 				UserID:             userID,
@@ -75,10 +131,10 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 			err := jobManager.EnqueueJob(jobReq)
 			if err != nil {
 				if err.Error() == "queue_full" {
-					logger.WarnWithUser(email, "calendar_handler", "Queue full", nil)
+					logger.WarnWithUser(email, "attendance_handler", "Queue full", nil)
 					json.NewEncoder(w).Encode(map[string]string{"response": "queue_full"})
 				} else {
-					logger.ErrorWithUser(email, "calendar_handler", "Failed to enqueue login job", err, nil)
+					logger.ErrorWithUser(email, "attendance_handler", "Failed to enqueue login job", err, nil)
 					json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 				}
 				return
@@ -94,13 +150,13 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 		if isExpired {
 			// Token expired - check if password is provided for login retry
 			if password == "" {
-				logger.WarnWithUser(email, "calendar_handler", "Token expired but no password provided", nil)
+				logger.WarnWithUser(email, "attendance_handler", "Token expired but no password provided", nil)
 				json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 				return
 			}
 
 			// Create login job (medium priority)
-			logger.InfoWithUser(email, "calendar_handler", "Token expired, enqueuing login job", nil)
+			logger.InfoWithUser(email, "attendance_handler", "Token expired, enqueuing login job", nil)
 
 			jobReq := models.JobCreateRequest{
 				UserID:   userID,
@@ -114,10 +170,10 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 			err := jobManager.EnqueueJob(jobReq)
 			if err != nil {
 				if err.Error() == "queue_full" {
-					logger.WarnWithUser(email, "calendar_handler", "Queue full", nil)
+					logger.WarnWithUser(email, "attendance_handler", "Queue full", nil)
 					json.NewEncoder(w).Encode(map[string]string{"response": "queue_full"})
 				} else {
-					logger.ErrorWithUser(email, "calendar_handler", "Failed to enqueue login job", err, nil)
+					logger.ErrorWithUser(email, "attendance_handler", "Failed to enqueue login job", err, nil)
 					json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 				}
 				return
@@ -128,7 +184,7 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 		}
 
 		// Token is valid but no fresh cache - create fetch job
-		logger.InfoWithUser(email, "calendar_handler", "Token valid but no fresh cache, enqueuing fetch job", nil)
+		logger.InfoWithUser(email, "attendance_handler", "Token valid but no fresh cache, enqueuing fetch job", nil)
 
 		jobReq := models.JobCreateRequest{
 			UserID:   userID,
@@ -139,7 +195,7 @@ func CalendarHandler(jobManager *jobs.Manager) http.HandlerFunc {
 
 		err := jobManager.EnqueueJob(jobReq)
 		if err != nil {
-			logger.ErrorWithUser(email, "calendar_handler", "Failed to enqueue fetch job", err, nil)
+			logger.ErrorWithUser(email, "attendance_handler", "Failed to enqueue fetch job", err, nil)
 			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
 			return
 		}
