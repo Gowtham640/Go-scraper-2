@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,13 +23,13 @@ import (
 
 // Global browser instance and semaphore
 var (
-	globalBrowser     *playwright.Browser
+	globalBrowser     playwright.Browser
 	globalBrowserOnce sync.Once
 	loginSemaphore    = make(chan struct{}, 3) // Capacity 3 for concurrent contexts
 )
 
 // getGlobalBrowser returns the singleton browser instance, launching it if needed
-func getGlobalBrowser() *playwright.Browser {
+func getGlobalBrowser() playwright.Browser {
 	globalBrowserOnce.Do(func() {
 		pw, err := playwright.Run()
 		if err != nil {
@@ -132,6 +133,20 @@ func main() {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+
+	// Graceful shutdown on interrupt/terminate signals
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-shutdownCh
+		logger.Info("server_shutdown", fmt.Sprintf("Signal %s received, shutting down", sig), nil)
+		shutdownGlobalBrowser()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Error("server_shutdown", "Graceful shutdown failed", err, nil)
+		}
+	}()
 
 	if err := server.ListenAndServe(); err != nil {
 		logger.Fatal("server_start", "Failed to start server", err)
