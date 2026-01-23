@@ -5,6 +5,7 @@ import "time"
 // LoginRequest represents the login request from frontend
 type LoginRequest struct {
 	Account  string `json:"account"`
+	Email    string `json:"email"`
 	Password string `json:"password"`
 	CDigest  string `json:"cdigest,omitempty"`
 	Captcha  string `json:"captcha,omitempty"`
@@ -16,8 +17,8 @@ type LoginResponse struct {
 	UserId   string    `json:"X-User-Id,omitempty"`
 	UserInfo *UserInfo `json:"userInfo,omitempty"`
 	Tokens   string    `json:"tokens,omitempty"`
-	Captcha  string    `json:"captcha,omitempty"`  // base64 encoded captcha image
-	CDigest  string    `json:"cdigest,omitempty"`  // captcha digest for retry
+	Captcha  string    `json:"captcha,omitempty"` // base64 encoded captcha image
+	CDigest  string    `json:"cdigest,omitempty"` // captcha digest for retry
 	Error    string    `json:"error,omitempty"`
 }
 
@@ -56,10 +57,10 @@ type MarksAssessment struct {
 
 // MarksEntry represents the marks data for a single course
 type MarksEntry struct {
-	CourseCode string            `json:"courseCode"`
-	CourseTitle string           `json:"courseTitle"`
+	CourseCode  string            `json:"courseCode"`
+	CourseTitle string            `json:"courseTitle"`
 	Assessments []MarksAssessment `json:"assessments"`
-	Total       *float64         `json:"total"`
+	Total       *float64          `json:"total"`
 }
 
 // Course represents a single course
@@ -99,8 +100,8 @@ type TimetableSlot struct {
 
 // TimetableDay represents one day in the timetable
 type TimetableDay struct {
-	Day   int                `json:"day"`
-	Table []*TimetableSlot   `json:"table"`
+	Day   int              `json:"day"`
+	Table []*TimetableSlot `json:"table"`
 }
 
 // TimetableData represents the complete timetable data for caching
@@ -137,12 +138,12 @@ type CalendarData struct {
 
 // NormalizedCalendarEntry represents a single normalized calendar entry
 type NormalizedCalendarEntry struct {
-	Date     string `json:"date"`      // DD/MM/YYYY format
-	DayName  string `json:"day_name"`  // Mon, Tue, etc.
-	Event    *string `json:"event"`    // Holiday name or null
-	DayOrder string `json:"day_order"` // Day 1, Day 2, etc.
-	Month    string `json:"month"`     // Jan, Feb, etc.
-	Year     int    `json:"year"`      // 2025, 2026, etc.
+	Date     string  `json:"date"`      // DD/MM/YYYY format
+	DayName  string  `json:"day_name"`  // Mon, Tue, etc.
+	Event    *string `json:"event"`     // Holiday name or null
+	DayOrder string  `json:"day_order"` // Day 1, Day 2, etc.
+	Month    string  `json:"month"`     // Jan, Feb, etc.
+	Year     int     `json:"year"`      // 2025, 2026, etc.
 }
 
 // NormalizedCalendarData represents the complete normalized calendar data
@@ -187,16 +188,16 @@ type CaptchaResponse struct {
 
 // Job represents a background job in the system
 type Job struct {
-	ID            string    `json:"id"`
-	UserID        string    `json:"user_id"`
-	JobType       string    `json:"job_type"`       // 'login' or 'fetch'
-	DataType      string    `json:"data_type"`      // 'auth' for login, 'courses'/'timetable'/'calendar'/'user' for fetch
-	Status        string    `json:"status"`         // 'pending', 'running', 'done', 'failed'
-	Priority      int       `json:"priority"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string     `json:"id"`
+	UserID        string     `json:"user_id"`
+	JobType       string     `json:"job_type"`  // 'login' or 'fetch'
+	DataType      string     `json:"data_type"` // 'auth' for login, 'courses'/'timetable'/'calendar'/'user' for fetch
+	Status        string     `json:"status"`    // 'pending', 'running', 'done', 'failed'
+	Priority      int        `json:"priority"`
+	CreatedAt     time.Time  `json:"created_at"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
-	RetryCount    int       `json:"retry_count"`
-	FailureReason *string   `json:"failure_reason,omitempty"`
+	RetryCount    int        `json:"retry_count"`
+	FailureReason *string    `json:"failure_reason,omitempty"`
 	// Credentials for login jobs (not stored in DB, passed in memory)
 	Email    string `json:"-"` // JSON omit
 	Password string `json:"-"` // JSON omit
