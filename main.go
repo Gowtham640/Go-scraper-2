@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"srm-academia-scraper/config"
 	"srm-academia-scraper/handlers"
 	"srm-academia-scraper/jobs"
@@ -11,8 +13,11 @@ import (
 	"srm-academia-scraper/middleware"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
+	"sync"
+	"syscall"
 	"time"
 
+	"github.com/playwright-community/playwright-go"
 	"golang.org/x/time/rate"
 )
 
