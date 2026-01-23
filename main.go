@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"os/signal"
 	"srm-academia-scraper/config"
 	"srm-academia-scraper/handlers"
 	"srm-academia-scraper/jobs"
@@ -13,11 +11,8 @@ import (
 	"srm-academia-scraper/middleware"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
-	"sync"
-	"syscall"
 	"time"
 
-	"github.com/playwright-community/playwright-go"
 	"golang.org/x/time/rate"
 )
 
@@ -111,6 +106,8 @@ func main() {
 	mux.HandleFunc("/courses", handlers.CoursesHandler(jobManager))
 	mux.HandleFunc("/timetable", handlers.TimetableHandler(jobManager))
 	mux.HandleFunc("/calendar", handlers.CalendarHandler(jobManager))
+	mux.HandleFunc("/attendance", handlers.AttendanceHandler(jobManager))
+	mux.HandleFunc("/marks", handlers.MarksHandler(jobManager))
 	mux.HandleFunc("/health", handlers.HealthHandler())
 
 	// Apply middleware

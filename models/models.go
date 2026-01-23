@@ -35,6 +35,33 @@ type UserInfo struct {
 	Specialization string `json:"specialization,omitempty"`
 }
 
+// AttendanceEntry represents a single attendance record extracted from HTML
+type AttendanceEntry struct {
+	CourseCode           string  `json:"courseCode"`
+	CourseTitle          string  `json:"courseTitle"`
+	Category             string  `json:"category"`
+	Faculty              string  `json:"faculty"`
+	Slot                 string  `json:"slot"`
+	HoursConducted       float64 `json:"hoursConducted"`
+	HoursAbsent          float64 `json:"hoursAbsent"`
+	AttendancePercentage float64 `json:"attendancePercentage"`
+}
+
+// MarksAssessment represents an assessment entry within a course
+type MarksAssessment struct {
+	Name  string   `json:"name"`
+	Score *float64 `json:"score"`
+	Max   *float64 `json:"max"`
+}
+
+// MarksEntry represents the marks data for a single course
+type MarksEntry struct {
+	CourseCode string            `json:"courseCode"`
+	CourseTitle string           `json:"courseTitle"`
+	Assessments []MarksAssessment `json:"assessments"`
+	Total       *float64         `json:"total"`
+}
+
 // Course represents a single course
 type Course struct {
 	Code           string `json:"code"`
