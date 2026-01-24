@@ -22,6 +22,20 @@ type LoginResponse struct {
 	Error    string    `json:"error,omitempty"`
 }
 
+// DataRequest represents the shared payload for data-fetch endpoints
+type DataRequest struct {
+	UserID   string `json:"userId"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	UserType string `json:"userType"`
+}
+
+// ActionResponse represents the standardized response for data endpoints
+type ActionResponse struct {
+	Success bool   `json:"success"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 // UserInfo represents user profile data
 type UserInfo struct {
 	Name           string `json:"name"`
