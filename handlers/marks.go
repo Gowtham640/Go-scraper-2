@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
@@ -9,100 +8,45 @@ import (
 	"time"
 )
 
-// MarksHandler handles GET /marks requests
+// MarksHandler handles POST /marks requests
 func MarksHandler(jobManager *jobs.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			respondFailure(w, "method_not_allowed")
+			return
+		}
 
-		userID := r.Header.Get("X-User-Id")
+		req, ok := decodeDataRequest(w, r, "marks_handler")
+		if !ok {
+			return
+		}
+
+		userID := req.UserID
+		email := req.Email
+		password := req.Password
+		logger.InfoWithUser(email, "marks_handler", "Processing marks request", map[string]interface{}{
+			"user_type": req.UserType,
+		})
+
 		dataType := "marks"
 
-		if userID == "" {
-			logger.Warn("marks_handler", "Missing user id header", nil)
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "missing_user_id"})
-			return
-		}
-
-		if r.Method == http.MethodGet {
-			logger.Info("marks_handler", "GET marks cache requested", map[string]interface{}{
+		if _, err := jobManager.GetUserCache(userID, dataType); err == nil {
+			logger.Info("marks_handler", "Cached marks found, returning success", map[string]interface{}{
 				"user_id": userID,
 			})
-
-			data, err := jobManager.GetUserCache(userID, dataType)
-			if err != nil {
-				logger.Warn("marks_handler", "Cached marks not found, enqueuing fetch", map[string]interface{}{
-					"user_id": userID,
-					"error":   err.Error(),
-				})
-
-				jobReq := models.JobCreateRequest{
-					UserID:   userID,
-					JobType:  "fetch",
-					DataType: dataType,
-					Priority: 10,
-				}
-				if enqueueErr := jobManager.EnqueueJob(jobReq); enqueueErr != nil {
-					logger.Error("marks_handler", "Failed to enqueue marks fetch job", enqueueErr, map[string]interface{}{
-						"user_id":   userID,
-						"data_type": dataType,
-					})
-					json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "enqueue_failed"})
-					return
-				}
-
-				json.NewEncoder(w).Encode(map[string]string{"response": "queued"})
-				return
-			}
-
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"response": "success",
-				"data":     data,
-			})
+			respondSuccess(w)
 			return
 		}
-
-		if r.Method != http.MethodPost {
-			logger.Warn("marks_handler", "Method not allowed", map[string]interface{}{
-				"user_id": userID,
-				"method":  r.Method,
-			})
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "method_not_allowed"})
-			return
-		}
-
-		var req models.LoginRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			logger.Error("marks_handler", "Failed to parse request body", err, map[string]interface{}{
-				"user_id": userID,
-			})
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
-			return
-		}
-
-		email := req.Account
-		password := req.Password
-
-		if email == "" {
-			logger.Warn("marks_handler", "Missing email in request", map[string]interface{}{
-				"user_id": userID,
-			})
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail", "reason": "missing_email"})
-			return
-		}
-
-		logger.InfoWithUser(email, "marks_handler", "Processing marks request", nil)
 
 		tokenData, tokenErr := jobManager.GetToken(userID)
 
 		if tokenErr == nil {
 			_, updatedAt, cacheErr := jobManager.GetUserCacheWithTimestamp(userID, dataType)
-			if cacheErr == nil && updatedAt != nil {
-				if time.Since(*updatedAt) < 24*time.Hour {
-					logger.InfoWithUser(email, "marks_handler", "Fresh cache found with valid token, returning success", nil)
-					json.NewEncoder(w).Encode(map[string]string{"response": "success"})
-					return
-				}
+			if cacheErr == nil && updatedAt != nil && time.Since(*updatedAt) < 24*time.Hour {
+				logger.InfoWithUser(email, "marks_handler", "Fresh cache found with valid token, returning success", nil)
+				respondSuccess(w)
+				return
 			}
 		}
 
@@ -119,19 +63,18 @@ func MarksHandler(jobManager *jobs.Manager) http.HandlerFunc {
 				RequestedDataTypes: []string{dataType},
 			}
 
-			err := jobManager.EnqueueJob(jobReq)
-			if err != nil {
+			if err := jobManager.EnqueueJob(jobReq); err != nil {
 				if err.Error() == "queue_full" {
 					logger.WarnWithUser(email, "marks_handler", "Queue full", nil)
-					json.NewEncoder(w).Encode(map[string]string{"response": "queue_full"})
-				} else {
-					logger.ErrorWithUser(email, "marks_handler", "Failed to enqueue login job", err, nil)
-					json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+					respondFailure(w, "queue_full")
+					return
 				}
+				logger.ErrorWithUser(email, "marks_handler", "Failed to enqueue login job", err, nil)
+				respondFailure(w, "fail")
 				return
 			}
 
-			json.NewEncoder(w).Encode(map[string]string{"response": "success"})
+			respondSuccess(w)
 			return
 		}
 
@@ -140,7 +83,7 @@ func MarksHandler(jobManager *jobs.Manager) http.HandlerFunc {
 		if isExpired {
 			if password == "" {
 				logger.WarnWithUser(email, "marks_handler", "Token expired but no password provided", nil)
-				json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+				respondFailure(w, "fail")
 				return
 			}
 
@@ -155,19 +98,18 @@ func MarksHandler(jobManager *jobs.Manager) http.HandlerFunc {
 				Password: password,
 			}
 
-			err := jobManager.EnqueueJob(jobReq)
-			if err != nil {
+			if err := jobManager.EnqueueJob(jobReq); err != nil {
 				if err.Error() == "queue_full" {
 					logger.WarnWithUser(email, "marks_handler", "Queue full", nil)
-					json.NewEncoder(w).Encode(map[string]string{"response": "queue_full"})
-				} else {
-					logger.ErrorWithUser(email, "marks_handler", "Failed to enqueue login job", err, nil)
-					json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+					respondFailure(w, "queue_full")
+					return
 				}
+				logger.ErrorWithUser(email, "marks_handler", "Failed to enqueue login job", err, nil)
+				respondFailure(w, "fail")
 				return
 			}
 
-			json.NewEncoder(w).Encode(map[string]string{"response": "success"})
+			respondSuccess(w)
 			return
 		}
 
@@ -180,13 +122,12 @@ func MarksHandler(jobManager *jobs.Manager) http.HandlerFunc {
 			Priority: 10,
 		}
 
-		err := jobManager.EnqueueJob(jobReq)
-		if err != nil {
+		if err := jobManager.EnqueueJob(jobReq); err != nil {
 			logger.ErrorWithUser(email, "marks_handler", "Failed to enqueue fetch job", err, nil)
-			json.NewEncoder(w).Encode(map[string]string{"response": "fail"})
+			respondFailure(w, "fail")
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]string{"response": "success"})
+		respondSuccess(w)
 	}
 }
