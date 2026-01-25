@@ -23,7 +23,7 @@ func NewManager(db *storage.SupabaseClient, worker *worker.Worker) *Manager {
 }
 
 // GetUserCacheWithTimestamp retrieves cached data with timestamp
-func (m *Manager) GetUserCacheWithTimestamp(userID, dataType string) (interface{}, *time.Time, error) {
+func (m *Manager) GetUserCacheWithTimestamp(userID, dataType string) (interface{}, *time.Time, *time.Time, error) {
 	return m.db.GetUserCacheWithTimestamp(userID, dataType)
 }
 

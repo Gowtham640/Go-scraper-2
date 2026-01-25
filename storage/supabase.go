@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	supabase "github.com/supabase-community/supabase-go"
 	"github.com/supabase-community/gotrue-go/types"
 	"github.com/supabase-community/postgrest-go"
+	supabase "github.com/supabase-community/supabase-go"
 )
 
 type SupabaseClient struct {
@@ -19,7 +19,7 @@ type SupabaseClient struct {
 
 func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
 	logger.Info("supabase_init", "Initializing Supabase client", nil)
-	
+
 	client, err := supabase.NewClient(url, key, nil)
 	if err != nil {
 		logger.Error("supabase_init", "Failed to create Supabase client", err, nil)
@@ -33,7 +33,7 @@ func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
 // CreateAuthUser creates a user in auth.users table
 func (s *SupabaseClient) CreateAuthUser(email, password string) (string, error) {
 	logger.InfoWithUser(email, "create_auth_user", "Creating auth user", nil)
-	
+
 	// Use Supabase Admin API to create user
 	user, err := s.client.Auth.Signup(types.SignupRequest{
 		Email:    email,
@@ -89,9 +89,9 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 	logger.InfoWithUser(email, "upsert_token", "Upserting token", map[string]interface{}{
 		"expiry_days": expiryDays,
 	})
-	
+
 	expiryTimestamp := time.Now().Add(time.Duration(expiryDays) * 24 * time.Hour)
-	
+
 	data := map[string]interface{}{
 		"user_id":          userID,
 		"tokens":           tokens,
@@ -116,14 +116,14 @@ func (s *SupabaseClient) GetToken(userID string) (*models.TokenData, error) {
 	logger.Info("get_token", "Fetching token from database", map[string]interface{}{
 		"user_id": userID,
 	})
-	
+
 	var result []map[string]interface{}
 	var err error
 	_, err = s.client.From("tokens").
 		Select("*", "", false).
 		Eq("user_id", userID).
 		ExecuteTo(&result)
-	
+
 	if err != nil {
 		logger.Error("get_token", "Failed to fetch token", err, nil)
 		return nil, err
@@ -327,10 +327,10 @@ func (s *SupabaseClient) GetUserBatch(userID string) (string, error) {
 
 	batch := result[0]["batch"].(string)
 	logger.Info("get_user_batch", "User batch found", map[string]interface{}{
-		"user_id": userID,
-		"batch":   batch,
+		"user_id":    userID,
+		"batch":      batch,
 		"batch_type": fmt.Sprintf("%T", result[0]["batch"]),
-		"batch_raw": result[0]["batch"],
+		"batch_raw":  result[0]["batch"],
 	})
 	return batch, nil
 }
@@ -427,7 +427,7 @@ func (s *SupabaseClient) unmarshalData(rawData interface{}, target interface{}) 
 }
 
 // GetUserCacheWithTimestamp retrieves cached data with timestamp for freshness checking
-func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (interface{}, *time.Time, error) {
+func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (interface{}, *time.Time, *time.Time, error) {
 	logger.Info("get_user_cache_timestamp", "Fetching user cache with timestamp", map[string]interface{}{
 		"user_id":   userID,
 		"data_type": dataType,
@@ -436,14 +436,14 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 	var result []map[string]interface{}
 	var err error
 	_, err = s.client.From("user_cache").
-		Select("data, updated_at", "", false).
+		Select("data, updated_at, expires_at", "", false).
 		Eq("user_id", userID).
 		Eq("data_type", dataType).
 		ExecuteTo(&result)
 
 	if err != nil {
 		logger.Error("get_user_cache_timestamp", "Failed to fetch user cache", err, nil)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if len(result) == 0 {
@@ -451,7 +451,7 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 			"user_id":   userID,
 			"data_type": dataType,
 		})
-		return nil, nil, fmt.Errorf("no cached data found")
+		return nil, nil, nil, fmt.Errorf("no cached data found")
 	}
 
 	rawData := result[0]["data"]
@@ -462,6 +462,17 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 		// Still try to unmarshal data even if timestamp parsing fails
 	}
 
+	var expiresAt *time.Time
+	if expiresRaw, exists := result[0]["expires_at"]; exists && expiresRaw != nil {
+		if expiresStr, ok := expiresRaw.(string); ok && expiresStr != "" {
+			if parsedExpires, parseErr := time.Parse(time.RFC3339, expiresStr); parseErr == nil {
+				expiresAt = &parsedExpires
+			} else {
+				logger.Warn("get_user_cache_timestamp", "Failed to parse expires_at", map[string]interface{}{"error": parseErr.Error()})
+			}
+		}
+	}
+
 	// Unmarshal based on data type
 	var unmarshaledData interface{}
 	switch dataType {
@@ -469,28 +480,28 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 		var coursesData models.CoursesData
 		if err := s.unmarshalData(rawData, &coursesData); err != nil {
 			logger.Error("get_user_cache_timestamp", "Failed to unmarshal courses data", err, nil)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		unmarshaledData = coursesData
 	case "timetable":
 		var timetableData models.TimetableData
 		if err := s.unmarshalData(rawData, &timetableData); err != nil {
 			logger.Error("get_user_cache_timestamp", "Failed to unmarshal timetable data", err, nil)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		unmarshaledData = timetableData
 	case "calendar":
 		var calendarData models.CalendarData
 		if err := s.unmarshalData(rawData, &calendarData); err != nil {
 			logger.Error("get_user_cache_timestamp", "Failed to unmarshal calendar data", err, nil)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		unmarshaledData = calendarData
 	case "user":
 		var userInfo models.UserInfo
 		if err := s.unmarshalData(rawData, &userInfo); err != nil {
 			logger.Error("get_user_cache_timestamp", "Failed to unmarshal user data", err, nil)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		unmarshaledData = userInfo
 	default:
@@ -504,8 +515,9 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 		"user_id":    userID,
 		"data_type":  dataType,
 		"updated_at": updatedAt,
+		"expires_at": expiresAt,
 	})
-	return unmarshaledData, &updatedAt, nil
+	return unmarshaledData, &updatedAt, expiresAt, nil
 }
 
 // EnqueueJob creates a new job with deduplication logic
@@ -568,9 +580,9 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 
 	if len(existingResult) > 0 {
 		logger.Info("enqueue_job", "Job already exists, skipping enqueue", map[string]interface{}{
-			"user_id":   req.UserID,
-			"job_type":  req.JobType,
-			"data_type": req.DataType,
+			"user_id":         req.UserID,
+			"job_type":        req.JobType,
+			"data_type":       req.DataType,
 			"existing_status": existingResult[0]["status"],
 		})
 		return nil, nil, fmt.Errorf("job already exists")
@@ -598,12 +610,12 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 	}
 
 	job := &models.Job{
-		ID:       result[0]["id"].(string),
-		UserID:   req.UserID,
-		JobType:  req.JobType,
-		DataType: req.DataType,
-		Status:   "pending",
-		Priority: req.Priority,
+		ID:         result[0]["id"].(string),
+		UserID:     req.UserID,
+		JobType:    req.JobType,
+		DataType:   req.DataType,
+		Status:     "pending",
+		Priority:   req.Priority,
 		RetryCount: 0,
 	}
 
@@ -831,10 +843,10 @@ func (s *SupabaseClient) EnqueueSpecificFetchJobs(userID string, requestedDataTy
 	}
 
 	logger.Info("enqueue_specific_fetch_jobs", "Specific fetch jobs enqueued", map[string]interface{}{
-		"user_id":       userID,
-		"requested":     len(requestedDataTypes),
-		"successful":    successCount,
-		"failed":        len(requestedDataTypes) - successCount,
+		"user_id":    userID,
+		"requested":  len(requestedDataTypes),
+		"successful": successCount,
+		"failed":     len(requestedDataTypes) - successCount,
 	})
 	return nil
 }

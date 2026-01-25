@@ -37,5 +37,10 @@ func decodeDataRequest(w http.ResponseWriter, r *http.Request, handler string) (
 		return nil, false
 	}
 
+	if req.UserType != "new" && req.UserType != "old" {
+		respondFailure(w, "invalid_user_type")
+		return nil, false
+	}
+
 	return &req, true
 }

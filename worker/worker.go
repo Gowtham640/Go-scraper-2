@@ -423,7 +423,7 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 	timetableData.Batch = userBatch
 
 	// Store timetable in cache
-	err = w.db.UpsertUserCache(job.UserID, "timetable", timetableData, 24*7) // 7 days for timetable
+	err = w.db.UpsertUserCache(job.UserID, "timetable", timetableData, 24*30) // 1 month for timetable
 	if err != nil {
 		failureMsg := fmt.Sprintf("Timetable cache storage failed: %v", err)
 		return false, &failureMsg
@@ -638,10 +638,10 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 	logger.Info("fetch_attendance", "Storing attendance data in cache", map[string]interface{}{
 		"job_id":    job.ID,
 		"user_id":   job.UserID,
-		"cache_ttl": 24,
+		"cache_ttl": 2,
 		"data_type": "attendance",
 	})
-	err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 24)
+	err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 2)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
 		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
@@ -756,7 +756,7 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 		"user_id":   job.UserID,
 		"data_type": "marks",
 	})
-	err = w.db.UpsertUserCache(job.UserID, "marks", marksData, 24)
+	err = w.db.UpsertUserCache(job.UserID, "marks", marksData, 12)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
 		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
