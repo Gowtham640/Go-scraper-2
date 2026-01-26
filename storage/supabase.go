@@ -652,7 +652,6 @@ func (s *SupabaseClient) CountRunningLoginJobs() (int, error) {
 
 // ClaimNextJob atomically claims the next pending job for execution
 func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
-	logger.Info("claim_next_job", "Attempting to claim next job", nil)
 
 	// First, find the next job to claim
 	var jobsResult []map[string]interface{}

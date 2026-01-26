@@ -32,15 +32,37 @@ func NewWorker(db *storage.SupabaseClient) *Worker {
 func (w *Worker) Start() {
 	logger.Info("worker_start", "Starting background worker", nil)
 
+	// Dedicated goroutine for login requests retains prior behavior via loginChan.
+	logger.Info("worker_start", "Login worker goroutine started", map[string]interface{}{"log_type": "login"})
 	go func() {
 		for {
-			select {
-			case loginReq := <-w.loginChan:
-				w.processLoginRequest(loginReq)
-			default:
+			loginReq := <-w.loginChan
+			w.processLoginRequest(loginReq)
+		}
+	}()
+
+	// Spawn three independent fetch-job workers that reuse existing processNextJob logic.
+	for i := 0; i < 3; i++ {
+		workerID := i + 1
+		logger.Info("worker_start", "Fetch worker goroutine started", map[string]interface{}{
+			"log_type":  "fetch",
+			"worker_id": workerID,
+		})
+		go func() {
+			for {
 				w.processNextJob()
+				time.Sleep(1 * time.Second) // Prevent tight loop
 			}
-			time.Sleep(1 * time.Second) // Prevent tight loop
+		}()
+	}
+
+	// Periodically log claim attempts so we avoid flooding logs while still showing activity.
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		logger.Info("claim_next_job", "Attempting to claim next job", nil)
+		for range ticker.C {
+			logger.Info("claim_next_job", "Attempting to claim next job", nil)
 		}
 	}()
 }
