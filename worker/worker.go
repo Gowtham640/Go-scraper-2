@@ -32,15 +32,37 @@ func NewWorker(db *storage.SupabaseClient) *Worker {
 func (w *Worker) Start() {
 	logger.Info("worker_start", "Starting background worker", nil)
 
+	// Dedicated goroutine for login requests retains prior behavior via loginChan.
+	logger.Info("worker_start", "Login worker goroutine started", map[string]interface{}{"log_type": "login"})
 	go func() {
 		for {
-			select {
-			case loginReq := <-w.loginChan:
-				w.processLoginRequest(loginReq)
-			default:
+			loginReq := <-w.loginChan
+			w.processLoginRequest(loginReq)
+		}
+	}()
+
+	// Spawn three independent fetch-job workers that reuse existing processNextJob logic.
+	for i := 0; i < 3; i++ {
+		workerID := i + 1
+		logger.Info("worker_start", "Fetch worker goroutine started", map[string]interface{}{
+			"log_type":  "fetch",
+			"worker_id": workerID,
+		})
+		go func() {
+			for {
 				w.processNextJob()
+				time.Sleep(1 * time.Second) // Prevent tight loop
 			}
-			time.Sleep(1 * time.Second) // Prevent tight loop
+		}()
+	}
+
+	// Periodically log claim attempts so we avoid flooding logs while still showing activity.
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		logger.Info("claim_next_job", "Attempting to claim next job", nil)
+		for range ticker.C {
+			logger.Info("claim_next_job", "Attempting to claim next job", nil)
 		}
 	}()
 }
@@ -423,7 +445,7 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 	timetableData.Batch = userBatch
 
 	// Store timetable in cache
-	err = w.db.UpsertUserCache(job.UserID, "timetable", timetableData, 24*7) // 7 days for timetable
+	err = w.db.UpsertUserCache(job.UserID, "timetable", timetableData, 24*30) // 1 month for timetable
 	if err != nil {
 		failureMsg := fmt.Sprintf("Timetable cache storage failed: %v", err)
 		return false, &failureMsg
@@ -638,10 +660,10 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 	logger.Info("fetch_attendance", "Storing attendance data in cache", map[string]interface{}{
 		"job_id":    job.ID,
 		"user_id":   job.UserID,
-		"cache_ttl": 24,
+		"cache_ttl": 2,
 		"data_type": "attendance",
 	})
-	err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 24)
+	err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 2)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
 		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
@@ -756,7 +778,7 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 		"user_id":   job.UserID,
 		"data_type": "marks",
 	})
-	err = w.db.UpsertUserCache(job.UserID, "marks", marksData, 24)
+	err = w.db.UpsertUserCache(job.UserID, "marks", marksData, 12)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
 		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{

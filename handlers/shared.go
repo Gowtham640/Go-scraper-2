@@ -3,8 +3,10 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"srm-academia-scraper/auth"
+	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/scraper"
@@ -142,4 +144,100 @@ func FetchCoursesData(db *storage.SupabaseClient, userID, email, password string
 	})
 
 	return coursesData, nil
+}
+
+func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType string, req *models.DataRequest, initialRequested []string, w http.ResponseWriter) {
+	email := req.Email
+	userID := req.UserID
+
+	logger.InfoWithUser(email, handlerName, fmt.Sprintf("Processing %s request", dataType), map[string]interface{}{
+		"user_type": req.UserType,
+	})
+
+	_, updatedAt, expiresAt, cacheErr := jobManager.GetUserCacheWithTimestamp(userID, dataType)
+	cacheFresh := false
+	if expiresAt != nil && time.Now().Before(*expiresAt) {
+		cacheFresh = true
+	}
+
+	cacheInfo := map[string]interface{}{
+		"data_type":   dataType,
+		"has_cache":   cacheErr == nil,
+		"cache_fresh": cacheFresh,
+	}
+
+	if updatedAt != nil {
+		cacheInfo["updated_at"] = updatedAt
+	}
+	if expiresAt != nil {
+		cacheInfo["expires_at"] = expiresAt
+	}
+	if cacheErr != nil {
+		cacheInfo["cache_error"] = cacheErr.Error()
+	}
+
+	logger.InfoWithUser(email, handlerName, "Cache metadata", cacheInfo)
+
+	tokenData, tokenErr := jobManager.GetToken(userID)
+	now := time.Now()
+
+	var jobReq models.JobCreateRequest
+	if tokenErr != nil {
+		logger.InfoWithUser(email, handlerName, "No token found, enqueuing login job", nil)
+		jobReq = models.JobCreateRequest{
+			UserID:             userID,
+			JobType:            "login",
+			DataType:           "auth",
+			Priority:           100,
+			Email:              email,
+			Password:           req.Password,
+			RequestedDataTypes: initialRequested,
+		}
+	} else if now.After(tokenData.ExpiryTimestamp) {
+		if req.Password == "" {
+			logger.WarnWithUser(email, handlerName, "Token expired but no password provided", nil)
+			respondFailure(w, "fail")
+			return
+		}
+
+		logger.InfoWithUser(email, handlerName, "Token expired, enqueuing login job", nil)
+		jobReq = models.JobCreateRequest{
+			UserID:   userID,
+			JobType:  "login",
+			DataType: "auth",
+			Priority: 50,
+			Email:    email,
+			Password: req.Password,
+		}
+	} else {
+		logger.InfoWithUser(email, handlerName, "Token valid, enqueuing fetch job", nil)
+		jobReq = models.JobCreateRequest{
+			UserID:   userID,
+			JobType:  "fetch",
+			DataType: dataType,
+			Priority: 10,
+		}
+	}
+
+	if err := jobManager.EnqueueJob(jobReq); err != nil {
+		if err.Error() == "queue_full" {
+			logger.WarnWithUser(email, handlerName, "Queue full", map[string]interface{}{
+				"user_type": req.UserType,
+			})
+			if req.UserType == "old" {
+				respondFailure(w, "queue_full")
+				return
+			}
+			respondSuccess(w)
+			return
+		}
+		logger.ErrorWithUser(email, handlerName, "Failed to enqueue job", err, map[string]interface{}{
+			"job_type":  jobReq.JobType,
+			"data_type": jobReq.DataType,
+		})
+		respondFailure(w, "fail")
+		return
+	}
+
+	respondSuccess(w)
 }
