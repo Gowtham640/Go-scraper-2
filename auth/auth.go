@@ -188,9 +188,9 @@ func (a *AuthService) PasswordAuth(identifier, digest, password string) (string,
 // FetchCaptcha fetches CAPTCHA image when required
 func (a *AuthService) FetchCaptcha(cdigest string) (string, error) {
 	logger.Info("auth_captcha", "Fetching CAPTCHA image", nil)
-	
+
 	captchaURL := fmt.Sprintf(CaptchaURLTemplate, cdigest)
-	
+
 	scraper.RateLimit(1 * time.Second)
 	body, err := a.httpClient.Get(captchaURL)
 	if err != nil {
@@ -267,7 +267,7 @@ func (a *AuthService) Login(email, password, cdigest, captcha string) (string, s
 func ExtractExpiryDays(cookies string) int {
 	// Default to 35 days if not found
 	defaultExpiry := 35
-	
+
 	// Look for Max-Age or expires in cookies
 	parts := strings.Split(cookies, ";")
 	for _, part := range parts {
@@ -282,6 +282,6 @@ func ExtractExpiryDays(cookies string) int {
 			}
 		}
 	}
-	
+
 	return defaultExpiry
 }
