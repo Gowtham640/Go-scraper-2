@@ -658,6 +658,7 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 	_, err := s.client.From("jobs").
 		Select("*", "", false).
 		Eq("status", "pending").
+		Neq("data_type", models.AttendanceDataType).
 		Order("priority", &postgrest.OrderOpts{Ascending: false}).
 		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
 		Limit(1, "").
@@ -737,6 +738,93 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 		"data_type": job.DataType,
 		"priority":  job.Priority,
 	})
+	return job, nil
+}
+
+// ClaimNextAttendanceJob claims only attendance jobs for the dedicated scheduler worker.
+func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
+
+	var jobsResult []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("*", "", false).
+		Eq("status", "pending").
+		Eq("data_type", models.AttendanceDataType).
+		Eq("priority", fmt.Sprintf("%d", models.JobPriorityLowest)).
+		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
+		Limit(1, "").
+		ExecuteTo(&jobsResult)
+
+	if err != nil {
+		logger.Error("claim_attendance_job", "Failed to find next attendance job", err, nil)
+		return nil, err
+	}
+
+	if len(jobsResult) == 0 {
+		return nil, nil
+	}
+
+	jobData := jobsResult[0]
+	jobID := jobData["id"].(string)
+
+	now := time.Now().Format(time.RFC3339)
+	updateData := map[string]interface{}{
+		"status":     "running",
+		"started_at": now,
+	}
+
+	var updateResult []map[string]interface{}
+	_, err = s.client.From("jobs").
+		Update(updateData, "", "").
+		Eq("id", jobID).
+		Eq("status", "pending").
+		ExecuteTo(&updateResult)
+
+	if err != nil {
+		logger.Error("claim_attendance_job", "Failed to claim attendance job", err, nil)
+		return nil, err
+	}
+
+	if len(updateResult) == 0 {
+		logger.Info("claim_attendance_job", "Attendance job claimed by another worker", map[string]interface{}{
+			"job_id": jobID,
+		})
+		return nil, nil
+	}
+
+	job := &models.Job{
+		ID:         jobID,
+		UserID:     jobData["user_id"].(string),
+		JobType:    jobData["job_type"].(string),
+		DataType:   jobData["data_type"].(string),
+		Status:     "running",
+		Priority:   int(jobData["priority"].(float64)),
+		RetryCount: int(jobData["retry_count"].(float64)),
+	}
+
+	if createdAtStr, ok := jobData["created_at"].(string); ok {
+		if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+			job.CreatedAt = createdAt
+		}
+	}
+
+	if startedAtStr, ok := jobData["started_at"].(string); ok {
+		if startedAt, err := time.Parse(time.RFC3339, startedAtStr); err == nil {
+			job.StartedAt = &startedAt
+		}
+	}
+
+	if failureReason, ok := jobData["failure_reason"].(string); ok {
+		job.FailureReason = &failureReason
+	}
+
+	logger.Info("claim_attendance_job", "Attendance job claimed successfully", map[string]interface{}{
+		"job_id":    job.ID,
+		"user_id":   job.UserID,
+		"job_type":  job.JobType,
+		"data_type": job.DataType,
+		"priority":  job.Priority,
+	})
+
 	return job, nil
 }
 

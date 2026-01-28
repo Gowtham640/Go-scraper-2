@@ -56,6 +56,14 @@ func (w *Worker) Start() {
 		}()
 	}
 
+	go func() {
+		logger.Info("attendance_worker", "Dedicated attendance worker started", map[string]interface{}{"log_type": "attendance"})
+		for {
+			w.processNextAttendanceJob()
+			time.Sleep(2 * time.Second) // keep scheduling intervals
+		}
+	}()
+
 	// Periodically log claim attempts so we avoid flooding logs while still showing activity.
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -84,18 +92,35 @@ func (w *Worker) EnqueueLoginRequest(req models.WorkerLoginRequest) {
 
 // processNextJob claims and executes the next pending job
 func (w *Worker) processNextJob() {
-	// Claim next job
 	job, err := w.db.ClaimNextJob()
 	if err != nil {
 		logger.Error("worker_process", "Failed to claim job", err, nil)
 		return
 	}
-
 	if job == nil {
-		// No jobs available
 		return
 	}
+	w.processClaimedJob(job)
+}
 
+func (w *Worker) processNextAttendanceJob() {
+	job, err := w.db.ClaimNextAttendanceJob()
+	if err != nil {
+		logger.Error("attendance_worker", "Failed to claim attendance job", err, nil)
+		return
+	}
+	if job == nil {
+		return
+	}
+	w.processClaimedJob(job)
+	logger.Info("attendance_worker", "Attendance job processed", map[string]interface{}{
+		"job_id":   job.ID,
+		"user_id":  job.UserID,
+		"priority": job.Priority,
+	})
+}
+
+func (w *Worker) processClaimedJob(job *models.Job) {
 	logger.Info("worker_process", "Processing job", map[string]interface{}{
 		"job_id":    job.ID,
 		"user_id":   job.UserID,
@@ -104,7 +129,6 @@ func (w *Worker) processNextJob() {
 		"priority":  job.Priority,
 	})
 
-	// Execute job based on type
 	var success bool
 	var failureReason *string
 
@@ -119,25 +143,21 @@ func (w *Worker) processNextJob() {
 		success = false
 	}
 
-	// Update job status
 	var newStatus string
 	if success {
 		newStatus = "done"
 	} else {
-		// Check retry logic
 		if job.RetryCount < 2 {
 			logger.Info("worker_process", "Job failed, retrying", map[string]interface{}{
 				"job_id":      job.ID,
 				"retry_count": job.RetryCount,
 			})
-			// Increment retry count and reset to pending
 			err := w.db.IncrementJobRetry(job.ID)
 			if err != nil {
 				logger.Error("worker_process", "Failed to increment retry count", err, map[string]interface{}{
 					"job_id": job.ID,
 				})
 			}
-			// Reset to pending for retry
 			newStatus = "pending"
 		} else {
 			logger.Info("worker_process", "Job failed permanently", map[string]interface{}{
@@ -149,7 +169,7 @@ func (w *Worker) processNextJob() {
 		}
 	}
 
-	err = w.db.UpdateJobStatus(job.ID, newStatus, failureReason)
+	err := w.db.UpdateJobStatus(job.ID, newStatus, failureReason)
 	if err != nil {
 		logger.Error("worker_process", "Failed to update job status", err, map[string]interface{}{
 			"job_id": job.ID,
@@ -539,6 +559,9 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		"endpoint": scraper.AttendanceURL,
 	})
 
+	// Spread out attendance fetches to reduce portal load.
+	time.Sleep(750 * time.Millisecond)
+
 	// Apply rate limiting
 	logger.Info("fetch_attendance", "Applying rate limit before request", map[string]interface{}{
 		"job_id":  job.ID,
@@ -630,8 +653,20 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		})
 	}
 
-	decodedHTML, err := scraper.ExtractSanitizedHTML(string(htmlContent))
+	rawHTML := string(htmlContent)
+	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
+		if isLikelyLoginPage(rawHTML) {
+			logger.Warn("fetch_attendance", "Detected login page instead of attendance data", map[string]interface{}{
+				"job_id":  job.ID,
+				"user_id": job.UserID,
+				"snippet": snippet(rawHTML),
+			})
+			w.enqueueAttendanceLogin(job.UserID)
+			failureMsg := "Login page detected while fetching attendance"
+			return false, &failureMsg
+		}
+
 		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v", err)
 		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
 			"job_id":  job.ID,
@@ -639,6 +674,12 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		})
 		return false, &failureMsg
 	}
+
+	logger.Info("fetch_attendance", "Sanitized HTML extracted", map[string]interface{}{
+		"job_id":  job.ID,
+		"user_id": job.UserID,
+		"length":  len(decodedHTML),
+	})
 
 	attendanceEntries, err := scraper.ParseAttendance(decodedHTML)
 	if err != nil {
@@ -650,10 +691,17 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		return false, &failureMsg
 	}
 
+	logger.Info("fetch_attendance", "Parsed attendance entries", map[string]interface{}{
+		"job_id":      job.ID,
+		"user_id":     job.UserID,
+		"entry_count": len(attendanceEntries),
+	})
+
+	fetchedAt := time.Now().UTC()
 	attendanceData := map[string]interface{}{
 		"entries":    attendanceEntries,
 		"url":        scraper.AttendanceURL,
-		"fetched_at": time.Now().Format(time.RFC3339),
+		"fetched_at": fetchedAt.Format(time.RFC3339),
 	}
 
 	// Store in database cache
@@ -663,8 +711,7 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		"cache_ttl": 2,
 		"data_type": "attendance",
 	})
-	err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 2)
-	if err != nil {
+	if err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 2); err != nil {
 		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
 		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
 			"job_id":  job.ID,
@@ -673,14 +720,55 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		return false, &failureMsg
 	}
 
+	processor := newAttendanceProcessor(w.db)
+	if err := processor.Process(job.ID, job.UserID, attendanceEntries, fetchedAt); err != nil {
+		failureMsg := fmt.Sprintf("Attendance pipeline failed: %v", err)
+		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+		})
+		return false, &failureMsg
+	}
+
 	logger.Info("fetch_attendance", "Attendance fetch process completed successfully", map[string]interface{}{
-		"job_id":     job.ID,
-		"user_id":    job.UserID,
-		"cached":     true,
-		"file_saved": true,
+		"job_id":        job.ID,
+		"user_id":       job.UserID,
+		"cached":        true,
+		"file_saved":    true,
+		"pipeline_done": true,
 	})
 
 	return true, nil
+}
+
+func (w *Worker) enqueueAttendanceLogin(userID string) {
+	jobReq := models.JobCreateRequest{
+		UserID:   userID,
+		JobType:  "login",
+		DataType: "auth",
+		Priority: 50,
+	}
+	if _, _, err := w.db.EnqueueJob(jobReq); err != nil && err.Error() != "job already exists" {
+		logger.Warn("fetch_attendance", "Failed to enqueue login job for attendance recovery", map[string]interface{}{
+			"user_id": userID,
+			"error":   err.Error(),
+		})
+	}
+}
+
+func isLikelyLoginPage(body string) bool {
+	lowered := strings.ToLower(body)
+	return (strings.Contains(lowered, "login") && strings.Contains(lowered, "password")) ||
+		strings.Contains(lowered, "iamcsr") ||
+		strings.Contains(lowered, "auth") && strings.Contains(lowered, "token")
+}
+
+func snippet(body string) string {
+	const max = 200
+	if len(body) <= max {
+		return body
+	}
+	return body[:max]
 }
 
 // fetchMarks fetches marks data

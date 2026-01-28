@@ -8,6 +8,7 @@ import (
 	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/middleware"
+	"srm-academia-scraper/scheduler"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
 	"time"
@@ -42,6 +43,9 @@ func main() {
 	// Create job manager
 	jobManager := jobs.NewManager(db, jobWorker)
 	logger.Info("job_manager_init", "Job manager initialized", nil)
+	attendanceScheduler := scheduler.NewAttendanceScheduler(jobManager, db)
+	attendanceScheduler.Start()
+	logger.Info("attendance_scheduler_init", "Attendance scheduler started", nil)
 
 	// Create rate limiter (1 request per second per IP)
 	rateLimiter := middleware.NewRateLimiter(rate.Limit(1), 3)
