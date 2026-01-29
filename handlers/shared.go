@@ -201,13 +201,15 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 		}
 
 		logger.InfoWithUser(email, handlerName, "Token expired, enqueuing login job", nil)
+		// Ensure the worker knows which data to refresh after token renewal.
 		jobReq = models.JobCreateRequest{
-			UserID:   userID,
-			JobType:  "login",
-			DataType: "auth",
-			Priority: 50,
-			Email:    email,
-			Password: req.Password,
+			UserID:             userID,
+			JobType:            "login",
+			DataType:           "auth",
+			Priority:           50,
+			Email:              email,
+			Password:           req.Password,
+			RequestedDataTypes: []string{dataType},
 		}
 	} else {
 		logger.InfoWithUser(email, handlerName, "Token valid, enqueuing fetch job", nil)
