@@ -236,3 +236,11 @@ type WorkerLoginRequest struct {
 	Priority           int
 	RequestedDataTypes []string
 }
+
+const (
+	// AttendanceDataType marks the data type string used for attendance jobs.
+	AttendanceDataType = "attendance"
+
+	// JobPriorityLowest is the priority assigned to the dedicated attendance worker.
+	JobPriorityLowest = 1
+)
