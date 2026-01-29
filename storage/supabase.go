@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
@@ -16,6 +17,8 @@ import (
 type SupabaseClient struct {
 	client *supabase.Client
 }
+
+var ErrQueueFull = errors.New("queue_full")
 
 func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
 	logger.Info("supabase_init", "Initializing Supabase client", nil)
@@ -543,7 +546,7 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 			logger.Warn("enqueue_job", "Playwright limit reached", map[string]interface{}{
 				"running_login_jobs": runningCount,
 			})
-			return nil, nil, fmt.Errorf("queue_full")
+			return nil, nil, ErrQueueFull
 		}
 
 		// Return login request for worker

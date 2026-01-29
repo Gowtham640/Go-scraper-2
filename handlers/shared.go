@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -220,7 +221,7 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 	}
 
 	if err := jobManager.EnqueueJob(jobReq); err != nil {
-		if err.Error() == "queue_full" {
+		if errors.Is(err, storage.ErrQueueFull) {
 			logger.WarnWithUser(email, handlerName, "Queue full", map[string]interface{}{
 				"user_type": req.UserType,
 			})
@@ -239,5 +240,8 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 		return
 	}
 
+	if req.UserType == "old" {
+		logger.InfoWithUser(email, handlerName, "Old request accepted; refresh queued", nil)
+	}
 	respondSuccess(w)
 }

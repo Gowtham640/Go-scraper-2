@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"srm-academia-scraper/config"
 	"srm-academia-scraper/handlers"
 	"srm-academia-scraper/jobs"
@@ -11,10 +14,62 @@ import (
 	"srm-academia-scraper/scheduler"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
+	"sync"
+	"syscall"
 	"time"
 
+	"github.com/playwright-community/playwright-go"
 	"golang.org/x/time/rate"
 )
+
+// Global browser instance and semaphore
+var (
+	globalBrowser     playwright.Browser
+	globalBrowserOnce sync.Once
+	loginSemaphore    = make(chan struct{}, 3) // Capacity 3 for concurrent contexts
+)
+
+// getGlobalBrowser returns the singleton browser instance, launching it if needed
+func getGlobalBrowser() playwright.Browser {
+	globalBrowserOnce.Do(func() {
+		pw, err := playwright.Run()
+		if err != nil {
+			logger.Fatal("browser_init", "Failed to start Playwright", err)
+		}
+
+		browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+			Headless: playwright.Bool(false),
+			Args: []string{
+				"--no-sandbox",
+				"--disable-setuid-sandbox",
+				"--disable-dev-shm-usage",
+				"--disable-accelerated-2d-canvas",
+				"--no-first-run",
+				"--no-zygote",
+				"--disable-gpu",
+			},
+		})
+		if err != nil {
+			logger.Fatal("browser_init", "Failed to launch browser", err)
+		}
+
+		globalBrowser = browser
+		logger.Info("browser_init", "Global browser instance launched", nil)
+	})
+	return globalBrowser
+}
+
+// shutdownGlobalBrowser closes the global browser instance
+func shutdownGlobalBrowser() {
+	if globalBrowser != nil {
+		if err := globalBrowser.Close(); err != nil {
+			logger.Error("browser_shutdown", "Failed to close global browser", err, nil)
+		} else {
+			logger.Info("browser_shutdown", "Global browser instance closed", nil)
+		}
+		globalBrowser = nil
+	}
+}
 
 func main() {
 	// Load configuration
@@ -84,6 +139,20 @@ func main() {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+
+	// Graceful shutdown on interrupt/terminate signals
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-shutdownCh
+		logger.Info("server_shutdown", fmt.Sprintf("Signal %s received, shutting down", sig), nil)
+		shutdownGlobalBrowser()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Error("server_shutdown", "Graceful shutdown failed", err, nil)
+		}
+	}()
 
 	if err := server.ListenAndServe(); err != nil {
 		logger.Fatal("server_start", "Failed to start server", err)
