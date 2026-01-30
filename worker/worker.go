@@ -56,6 +56,26 @@ func (w *Worker) Start() {
 		}()
 	}
 
+	// Dedicated goroutine for attendance fetch jobs
+	go func() {
+		for {
+			attendanceJob, err := w.db.ClaimNextAttendanceJob()
+			if err != nil {
+				logger.Error("attendance_worker", "Failed to claim attendance job", err, nil)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			if attendanceJob == nil {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			w.executeJob(attendanceJob)
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
 	// Periodically log claim attempts so we avoid flooding logs while still showing activity.
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -96,6 +116,10 @@ func (w *Worker) processNextJob() {
 		return
 	}
 
+	w.executeJob(job)
+}
+
+func (w *Worker) executeJob(job *models.Job) {
 	logger.Info("worker_process", "Processing job", map[string]interface{}{
 		"job_id":    job.ID,
 		"user_id":   job.UserID,
@@ -149,7 +173,7 @@ func (w *Worker) processNextJob() {
 		}
 	}
 
-	err = w.db.UpdateJobStatus(job.ID, newStatus, failureReason)
+	err := w.db.UpdateJobStatus(job.ID, newStatus, failureReason)
 	if err != nil {
 		logger.Error("worker_process", "Failed to update job status", err, map[string]interface{}{
 			"job_id": job.ID,
