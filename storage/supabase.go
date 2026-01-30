@@ -749,7 +749,7 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 		Select("*", "", false).
 		Eq("status", "pending").
 		Eq("data_type", models.AttendanceDataType).
-		Eq("priority", fmt.Sprintf("%d", models.JobPriorityLowest)).
+		Order("priority", &postgrest.OrderOpts{Ascending: false}).
 		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
 		Limit(1, "").
 		ExecuteTo(&jobsResult)
