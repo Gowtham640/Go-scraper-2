@@ -77,6 +77,12 @@ func main() {
 		logger.Fatal("config_load", "Failed to load configuration", err)
 	}
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	cfg.Port = port
+
 	logger.Info("server_start", "Starting SRM Academia Scraper", map[string]interface{}{
 		"port": cfg.Port,
 	})
