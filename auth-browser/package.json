@@ -6,11 +6,15 @@
     "start": "node login.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["playwright", "authentication", "browser"],
+  "keywords": [
+    "playwright",
+    "authentication",
+    "browser"
+  ],
   "author": "",
   "license": "ISC",
   "description": "Browser-based authentication service for SRM Academia",
   "dependencies": {
-    "playwright": "^1.57.0"
+    "playwright": "^1.58.2"
   }
 }
