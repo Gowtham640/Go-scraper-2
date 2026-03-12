@@ -1,4 +1,4 @@
-﻿const { chromium } = require('playwright');
+const { chromium } = require('playwright');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -31,23 +31,15 @@ const proxiedConsole = new Proxy(baseConsole, {
 });
 globalThis.console = proxiedConsole;
 
-const PORT = parseInt(process.env.AUTH_SERVICE_PORT || '3001', 10);
+const PORT = process.env.AUTH_SERVICE_PORT || 3001;
 const CONTEXT_COUNT = 3;
 const pool = [];
 let browser;
 
 async function bootstrap() {
   browser = await chromium.launch({
-    headless: false,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu'
-    ]
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
 
   for (let i = 0; i < CONTEXT_COUNT; i++) {
