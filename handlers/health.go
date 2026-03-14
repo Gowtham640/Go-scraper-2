@@ -1,12 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
+
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
-	"srm-academia-scraper/scraper"
-	"time"
 )
 
 // HealthHandler handles GET /health requests
@@ -16,23 +17,31 @@ func HealthHandler() http.HandlerFunc {
 
 		logger.Info("health_check", "Health check requested", nil)
 
-		// Check SRM portal accessibility
-		srmStatus := "accessible"
-		httpClient := scraper.NewHTTPClient()
-		_, err := httpClient.Get(scraper.SRMBaseURL)
-		if err != nil {
-			srmStatus = "unreachable"
-		}
-
-		// Supabase check is implicit (if we're running, it's connected)
+		nodeStatus := "unreachable"
 		supabaseStatus := "connected"
+
+		ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:3001", nil)
+		if err == nil {
+			client := &http.Client{
+				Timeout: 500 * time.Millisecond,
+			}
+			if resp, err := client.Do(req); err == nil {
+				nodeStatus = "reachable"
+				resp.Body.Close()
+			} else {
+				logger.Error("health_check", "Auth browser ping failed", err, nil)
+			}
+		}
 
 		response := models.HealthResponse{
 			Status:    "healthy",
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Services: map[string]string{
-				"supabase": supabaseStatus,
-				"srm_api":  srmStatus,
+				"supabase":  supabaseStatus,
+				"node_auth": nodeStatus,
 			},
 		}
 
@@ -40,6 +49,7 @@ func HealthHandler() http.HandlerFunc {
 			"services": response.Services,
 		})
 
+		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	}
 }
