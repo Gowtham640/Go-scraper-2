@@ -11,9 +11,11 @@ log() {
 }
 
 cleanup_node() {
-  if [[ -n "${AUTH_PID:-}" && -e /proc/${AUTH_PID} ]]; then
-    log "Stopping auth browser service (pid ${AUTH_PID})"
-    kill "${AUTH_PID}" >/dev/null 2>&1 || true
+  if [[ -n "${AUTH_PID:-}" ]]; then
+    if ps -p "${AUTH_PID}" >/dev/null 2>&1; then
+      log "Stopping auth browser service (pid ${AUTH_PID})"
+      kill "${AUTH_PID}" >/dev/null 2>&1 || true
+    fi
   fi
 }
 
@@ -34,16 +36,23 @@ log "Auth browser service launched with PID ${AUTH_PID}"
 log "Waiting for auth browser to accept connections on http://127.0.0.1:${AUTH_SERVICE_PORT}..."
 
 attempt=1
-until curl --silent --fail --output /dev/null "http://127.0.0.1:${AUTH_SERVICE_PORT}"; do
-  if (( attempt >= MAX_AUTH_ATTEMPTS )); then
-    log "Auth browser failed to respond after ${AUTH_WAIT_TIMEOUT}s (last attempt ${attempt})"
-    exit 1
+while (( attempt <= MAX_AUTH_ATTEMPTS )); do
+  response_code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${AUTH_SERVICE_PORT}" || echo "000")
+  if [[ "${response_code}" != "000" ]]; then
+    log "Auth browser health probe succeeded (attempt ${attempt}/${MAX_AUTH_ATTEMPTS}, HTTP ${response_code})"
+    break
   fi
-  log "Auth browser not ready yet (attempt ${attempt}/${MAX_AUTH_ATTEMPTS}); retrying..."
+  log "Auth browser health probe failed (attempt ${attempt}/${MAX_AUTH_ATTEMPTS}); retrying..."
   attempt=$((attempt + 1))
   sleep 1
 done
 
-log "Auth browser responded after ${attempt} attempt(s); service is ready on port ${AUTH_SERVICE_PORT}"
-log "Go server will start now (PORT=${PORT}); command: PORT=${PORT} go run main.go"
+if (( attempt > MAX_AUTH_ATTEMPTS )); then
+  log "Auth browser failed to respond after ${AUTH_WAIT_TIMEOUT}s (last attempt ${MAX_AUTH_ATTEMPTS})"
+  exit 1
+fi
+
+log "Auth browser listening on port ${AUTH_SERVICE_PORT} (pid ${AUTH_PID}); status HTTP ${response_code}"
+log "Go server launch starting now (PORT=${PORT}); command: PORT=${PORT} go run main.go"
+
 exec go run main.go
