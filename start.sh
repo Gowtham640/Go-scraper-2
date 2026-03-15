@@ -26,6 +26,13 @@ export PORT
 log "start.sh invoked (cwd: $(pwd))"
 log "Configured ports: GO_SERVER=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
 
+log "Starting Go server first so Render detects the public port..."
+env PORT="${PORT}" go run main.go &
+
+GO_PID=$!
+
+sleep 2
+
 log "Starting auth browser service in background..."
 cd auth-browser
 AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT} node login.js &
@@ -53,6 +60,5 @@ if (( attempt > MAX_AUTH_ATTEMPTS )); then
 fi
 
 log "Auth browser listening on port ${AUTH_SERVICE_PORT} (pid ${AUTH_PID}); status HTTP ${response_code}"
-log "Go server launch starting now (PORT=${PORT}); command: PORT=${PORT} go run main.go"
 
-exec env PORT="${PORT}" go run main.go
+wait ${GO_PID}
