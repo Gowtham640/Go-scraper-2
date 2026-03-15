@@ -24,7 +24,7 @@ trap 'status=$?; if (( status != 0 )); then log "start.sh aborted before Go serv
 export PORT
 
 log "start.sh invoked (cwd: $(pwd))"
-log "Configured ports: GO_PORT=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
+log "Configured ports: GO_SERVER=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
 
 log "Starting auth browser service in background..."
 cd auth-browser
@@ -55,4 +55,4 @@ fi
 log "Auth browser listening on port ${AUTH_SERVICE_PORT} (pid ${AUTH_PID}); status HTTP ${response_code}"
 log "Go server launch starting now (PORT=${PORT}); command: PORT=${PORT} go run main.go"
 
-exec go run main.go
+exec env PORT="${PORT}" go run main.go
