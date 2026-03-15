@@ -87,44 +87,34 @@ func main() {
 		"port": cfg.Port,
 	})
 
-	// Initialize Supabase client
-	db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey)
-	if err != nil {
-		logger.Fatal("supabase_init", "Failed to initialize Supabase client", err)
-	}
-
-	logger.Info("supabase_init", "Supabase client initialized", nil)
-
-	// Start background worker
-	jobWorker := worker.NewWorker(db)
-	jobWorker.Start()
-	logger.Info("worker_init", "Background worker started", nil)
-
-	// Create job manager
-	jobManager := jobs.NewManager(db, jobWorker)
-	logger.Info("job_manager_init", "Job manager initialized", nil)
-
 	// Create rate limiter (1 request per second per IP)
 	rateLimiter := middleware.NewRateLimiter(rate.Limit(1), 3)
 	rateLimiter.CleanupOldLimiters(10 * time.Minute)
 
-	// Create router
-	mux := http.NewServeMux()
+	// Handler placeholder until initialization completes
+	var handlerMu sync.RWMutex
+	currentHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("Server is initializing; please try again shortly."))
+	})
 
-	// Register routes
-	mux.HandleFunc("/login", handlers.LoginHandler(db))
-	mux.HandleFunc("/user", handlers.UserHandler(jobManager))
-	mux.HandleFunc("/courses", handlers.CoursesHandler(jobManager))
-	mux.HandleFunc("/timetable", handlers.TimetableHandler(jobManager))
-	mux.HandleFunc("/calendar", handlers.CalendarHandler(jobManager))
-	mux.HandleFunc("/attendance", handlers.AttendanceHandler(jobManager))
-	mux.HandleFunc("/marks", handlers.MarksHandler(jobManager))
-	mux.HandleFunc("/health", handlers.HealthHandler())
+	setHandler := func(h http.Handler) {
+		handlerMu.Lock()
+		currentHandler = h
+		handlerMu.Unlock()
+	}
 
-	// Apply middleware
+	handlerProxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerMu.RLock()
+		h := currentHandler
+		handlerMu.RUnlock()
+		h.ServeHTTP(w, r)
+	})
+
 	handler := middleware.Logging(
 		middleware.CORS(
-			rateLimiter.Middleware(mux),
+			rateLimiter.Middleware(handlerProxy),
 		),
 	)
 
@@ -156,7 +146,49 @@ func main() {
 		}
 	}()
 
-	if err := server.ListenAndServe(); err != nil {
+	// Start the HTTP listener immediately
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- server.ListenAndServe()
+	}()
+
+	// Run heavy initialization after listener is live
+	go func() {
+		// Initialize Supabase client
+		db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey)
+		if err != nil {
+			logger.Fatal("supabase_init", "Failed to initialize Supabase client", err)
+		}
+
+		logger.Info("supabase_init", "Supabase client initialized", nil)
+
+		// Start background worker
+		jobWorker := worker.NewWorker(db)
+		jobWorker.Start()
+		logger.Info("worker_init", "Background worker started", nil)
+
+		// Create job manager
+		jobManager := jobs.NewManager(db, jobWorker)
+		logger.Info("job_manager_init", "Job manager initialized", nil)
+
+		// Create router
+		mux := http.NewServeMux()
+
+		// Register routes
+		mux.HandleFunc("/login", handlers.LoginHandler(db))
+		mux.HandleFunc("/user", handlers.UserHandler(jobManager))
+		mux.HandleFunc("/courses", handlers.CoursesHandler(jobManager))
+		mux.HandleFunc("/timetable", handlers.TimetableHandler(jobManager))
+		mux.HandleFunc("/calendar", handlers.CalendarHandler(jobManager))
+		mux.HandleFunc("/attendance", handlers.AttendanceHandler(jobManager))
+		mux.HandleFunc("/marks", handlers.MarksHandler(jobManager))
+		mux.HandleFunc("/health", handlers.HealthHandler())
+
+		setHandler(mux)
+		logger.Info("server_ready", "HTTP handler is ready", nil)
+	}()
+
+	if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
 		logger.Fatal("server_start", "Failed to start server", err)
 	}
 }

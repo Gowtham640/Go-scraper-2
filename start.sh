@@ -33,6 +33,9 @@ GO_PID=$!
 
 sleep 2
 
+log "Waiting for Go server to open port..."
+sleep 20
+
 log "Starting auth browser service in background..."
 cd auth-browser
 AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT} node login.js &
