@@ -93,7 +93,7 @@ func main() {
 
 	// Handler placeholder until initialization completes
 	var handlerMu sync.RWMutex
-	currentHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var currentHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("Server is initializing; please try again shortly."))
