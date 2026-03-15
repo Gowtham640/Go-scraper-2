@@ -37,7 +37,7 @@ func getGlobalBrowser() playwright.Browser {
 		}
 
 		browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-			Headless: playwright.Bool(false),
+			Headless: playwright.Bool(true),
 			Args: []string{
 				"--no-sandbox",
 				"--disable-setuid-sandbox",
@@ -119,7 +119,7 @@ func main() {
 	)
 
 	// Start server
-	addr := fmt.Sprintf(":%s", cfg.Port)
+	addr := fmt.Sprintf("0.0.0.0:%s", cfg.Port)
 	logger.Info("server_start", fmt.Sprintf("Server listening on port %s", cfg.Port), map[string]interface{}{
 		"address": addr,
 	})
