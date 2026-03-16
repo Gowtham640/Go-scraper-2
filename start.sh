@@ -3,18 +3,21 @@ set -euo pipefail
 
 AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT:-3001}
 AUTH_WAIT_TIMEOUT=${AUTH_WAIT_TIMEOUT:-30}
-MAX_AUTH_ATTEMPTS=${AUTH_WAIT_TIMEOUT}
 PORT=${PORT:-8080}
 
 log() {
   echo "[$(date +"%Y-%m-%dT%H:%M:%S%z")] $*"
 }
 
+########################################
+# CLEANUP HANDLER
+########################################
+
 cleanup() {
-  log "Shutdown signal received. Stopping services..."
+  log "Shutdown signal received"
 
   if [[ -n "${AUTH_PID:-}" ]] && ps -p "${AUTH_PID}" >/dev/null 2>&1; then
-    log "Stopping auth browser service (pid ${AUTH_PID})"
+    log "Stopping auth browser (pid ${AUTH_PID})"
     kill "${AUTH_PID}" || true
   fi
 
@@ -33,68 +36,103 @@ export PORT
 log "start.sh invoked (cwd: $(pwd))"
 log "Configured ports: GO_SERVER=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
 
-############################################
+########################################
 # START GO SERVER
-############################################
+########################################
 
 start_go() {
   log "Starting Go server..."
   env PORT="${PORT}" ./server &
   GO_PID=$!
-  log "Go server started with PID ${GO_PID}"
+  log "Go server PID ${GO_PID}"
 }
 
-start_go
+########################################
+# WAIT FOR GO SERVER
+########################################
 
-log "Waiting for Go server to open port ${PORT}..."
+wait_for_go() {
+  log "Waiting for Go server on port ${PORT}"
 
-until nc -z 127.0.0.1 ${PORT}; do
-  sleep 1
-done
+  while true; do
 
-log "Go server port is open"
+    if ! ps -p "${GO_PID}" >/dev/null 2>&1; then
+      log "Go server crashed during startup"
+      exit 1
+    fi
 
-############################################
-# START AUTH BROWSER
-############################################
+    if curl -s "http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
+      log "Go server ready"
+      break
+    fi
+
+    sleep 1
+  done
+}
+
+########################################
+# START AUTH SERVICE
+########################################
 
 start_auth() {
   log "Starting auth browser service..."
-  cd auth-browser
-  AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT} node login.js &
+
+  (
+    cd auth-browser
+    AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT} node login.js
+  ) &
+
   AUTH_PID=$!
-  cd ..
-  log "Auth browser service started with PID ${AUTH_PID}"
+  log "Auth browser PID ${AUTH_PID}"
 }
 
+########################################
+# WAIT FOR AUTH SERVICE
+########################################
+
+wait_for_auth() {
+  log "Waiting for auth browser on port ${AUTH_SERVICE_PORT}"
+
+  attempts=0
+
+  while true; do
+
+    if ! ps -p "${AUTH_PID}" >/dev/null 2>&1; then
+      log "Auth browser crashed during startup"
+      exit 1
+    fi
+
+    if curl -s "http://127.0.0.1:${AUTH_SERVICE_PORT}" >/dev/null 2>&1; then
+      log "Auth browser ready"
+      break
+    fi
+
+    attempts=$((attempts + 1))
+
+    if [[ "${attempts}" -ge "${AUTH_WAIT_TIMEOUT}" ]]; then
+      log "Auth browser startup timeout"
+      exit 1
+    fi
+
+    sleep 1
+  done
+}
+
+########################################
+# STARTUP SEQUENCE
+########################################
+
+start_go
+wait_for_go
+
 start_auth
+wait_for_auth
 
-log "Waiting for auth browser health check..."
+########################################
+# WATCHDOG LOOP
+########################################
 
-attempt=1
-while (( attempt <= MAX_AUTH_ATTEMPTS )); do
-  response_code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${AUTH_SERVICE_PORT}" || echo "000")
-
-  if [[ "${response_code}" != "000" ]]; then
-    log "Auth browser ready (attempt ${attempt}/${MAX_AUTH_ATTEMPTS}, HTTP ${response_code})"
-    break
-  fi
-
-  log "Auth browser health check failed (attempt ${attempt}/${MAX_AUTH_ATTEMPTS})"
-  attempt=$((attempt + 1))
-  sleep 1
-done
-
-if (( attempt > MAX_AUTH_ATTEMPTS )); then
-  log "Auth browser failed to start"
-  exit 1
-fi
-
-############################################
-# PROCESS WATCHDOG (KEEPS BOTH ALIVE)
-############################################
-
-log "Entering process monitor loop"
+log "Entering process watchdog"
 
 while true; do
   sleep 5
@@ -102,10 +140,12 @@ while true; do
   if ! ps -p "${GO_PID}" >/dev/null 2>&1; then
     log "Go server stopped unexpectedly — restarting"
     start_go
+    wait_for_go
   fi
 
   if ! ps -p "${AUTH_PID}" >/dev/null 2>&1; then
     log "Auth browser stopped unexpectedly — restarting"
     start_auth
+    wait_for_auth
   fi
 done
