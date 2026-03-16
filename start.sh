@@ -27,7 +27,7 @@ log "start.sh invoked (cwd: $(pwd))"
 log "Configured ports: GO_SERVER=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
 
 log "Starting Go server first so Render detects the public port..."
-env PORT="${PORT}" go run main.go &
+env PORT="${PORT}" ./server &
 
 GO_PID=$!
 
