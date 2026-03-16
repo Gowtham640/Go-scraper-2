@@ -1,4 +1,4 @@
-﻿const { chromium } = require('playwright');
+const { chromium } = require('playwright');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -507,7 +507,9 @@ function isDashboardUrl(url) {
   if (!url) {
     return false;
   }
-  return url.includes('/portal/academia-academic-services') || url.includes('#WELCOME');
+  return url.includes('/portal/academia-academic-services') ||
+    url.includes('#WELCOME') ||
+    isRootDomain(url);
 }
 
 async function ensureDashboardUrl(page) {

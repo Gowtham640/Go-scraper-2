@@ -61,7 +61,7 @@ wait_for_go() {
       exit 1
     fi
 
-    if curl -s "http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
       log "Go server ready"
       break
     fi
