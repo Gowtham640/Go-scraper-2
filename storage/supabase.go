@@ -101,7 +101,36 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 
 	var result []map[string]interface{}
 	var err error
-	_, err = s.client.From("tokens").Upsert(data, "", "", "").ExecuteTo(&result)
+
+	var existing []map[string]interface{}
+	_, err = s.client.From("tokens").
+		Select("id", "", false).
+		Eq("user_id", userID).
+		ExecuteTo(&existing)
+	if err != nil {
+		logger.ErrorWithUser(email, "upsert_token", "Failed to query existing token", err, nil)
+		return err
+	}
+
+	if len(existing) > 0 {
+		updateData := map[string]interface{}{
+			"tokens":           tokens,
+			"expiry_timestamp": expiryTimestamp.Format(time.RFC3339),
+			"email":            email,
+		}
+
+		logger.InfoWithUser(email, "upsert_token", "Updating existing token", map[string]interface{}{"token_id": existing[0]["id"]})
+		_, err = s.client.From("tokens").
+			Update(updateData, "", "").
+			Eq("user_id", userID).
+			ExecuteTo(&result)
+	} else {
+		logger.InfoWithUser(email, "upsert_token", "Inserting new token", nil)
+		_, err = s.client.From("tokens").
+			Insert(data, false, "", "", "").
+			ExecuteTo(&result)
+	}
+
 	if err != nil {
 		logger.ErrorWithUser(email, "upsert_token", "Failed to upsert token", err, nil)
 		return err
