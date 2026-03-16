@@ -433,7 +433,9 @@ async function loginWithContext(entry, email, password) {
           console.error(`⏱️  Session reminder skip duration: ${Date.now() - sessionLimitStart}ms`);
           const afterSessionLimitUrl = page.url();
           console.error(`✅ Redirected to: ${afterSessionLimitUrl}`);
-          if (!afterSessionLimitUrl.includes('/portal/academia-academic-services') && !afterSessionLimitUrl.includes('#WELCOME')) {
+          if (!afterSessionLimitUrl.includes('/portal/academia-academic-services') &&
+            !afterSessionLimitUrl.includes('#WELCOME') &&
+            !isRootDomain(afterSessionLimitUrl)) {
             throw new Error('SESSION_REMINDER_SKIP_FAILED');
           }
 
