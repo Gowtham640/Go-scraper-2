@@ -19,7 +19,8 @@ cleanup_node() {
   fi
 }
 
-trap 'status=$?; if (( status != 0 )); then log "start.sh aborted before Go server exec (status=${status})"; fi; cleanup_node' EXIT
+# CHANGE 1: do not run cleanup on script exit (prevents self shutdown)
+trap cleanup_node SIGINT SIGTERM
 
 export PORT
 
@@ -31,10 +32,11 @@ env PORT="${PORT}" ./server &
 
 GO_PID=$!
 
-sleep 2
-
+# CHANGE 2: replace sleeps with active port wait
 log "Waiting for Go server to open port..."
-sleep 20
+until curl -s http://127.0.0.1:${PORT} >/dev/null 2>&1; do
+  sleep 1
+done
 
 log "Starting auth browser service in background..."
 cd auth-browser
