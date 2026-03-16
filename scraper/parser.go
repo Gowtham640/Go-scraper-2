@@ -170,90 +170,210 @@ func ParseMarks(html string) ([]models.MarksEntry, error) {
 		return nil, fmt.Errorf("failed to parse marks HTML: %w", err)
 	}
 
-	var entries []models.MarksEntry
+	marksTable := findMarksTable(doc)
+	if marksTable == nil {
+		return nil, fmt.Errorf("marks section not found")
+	}
 
-	doc.Find("table").Each(func(i int, table *goquery.Selection) {
-		var headerRowIdx = -1
-		codeIdx, titleIdx, totalIdx := -1, -1, -1
-		assessmentCols := map[int]string{}
+	headerRowIdx := -1
 
-		table.Find("tr").EachWithBreak(func(rowIdx int, row *goquery.Selection) bool {
-			matchedCode := false
-			matchedTitle := false
-			row.Find("th, td").Each(func(idx int, cell *goquery.Selection) {
-				text := strings.ToLower(strings.TrimSpace(cell.Text()))
-				switch {
-				case strings.Contains(text, "course code") && codeIdx == -1:
-					codeIdx = idx
-					matchedCode = true
-				case strings.Contains(text, "course title") && titleIdx == -1:
-					titleIdx = idx
-					matchedTitle = true
-				case strings.Contains(text, "total") && totalIdx == -1:
-					totalIdx = idx
-				case strings.Contains(text, "marks") || strings.Contains(text, "internal") ||
-					strings.Contains(text, "assessment") || strings.Contains(text, "test"):
-					assessmentCols[idx] = strings.TrimSpace(cell.Text())
-				}
-			})
-			if matchedCode && matchedTitle {
+	marksTable.Find("tr").EachWithBreak(func(rowIdx int, row *goquery.Selection) bool {
+		if headerRowIdx == -1 && row.Find("td").Length() > 0 {
+			if strings.Contains(strings.ToLower(row.Text()), "course code") &&
+				strings.Contains(strings.ToLower(row.Text()), "test performance") {
 				headerRowIdx = rowIdx
 				return false
 			}
-			return true
-		})
+		}
+		return true
+	})
 
-		if headerRowIdx == -1 || codeIdx == -1 || titleIdx == -1 {
+	if headerRowIdx == -1 {
+		return nil, fmt.Errorf("marks header row not found")
+	}
+
+	titleLookup := buildCourseTitleLookup(html)
+	var entries []models.MarksEntry
+
+	marksTable.Find("tr").Each(func(rowIdx int, row *goquery.Selection) {
+		if rowIdx <= headerRowIdx {
+			return
+		}
+		cells := row.Find("td")
+		if cells.Length() < 3 {
 			return
 		}
 
-		table.Find("tr").Each(func(rowIdx int, row *goquery.Selection) {
-			if rowIdx <= headerRowIdx {
-				return
-			}
-			cells := row.Find("td")
-			if cells.Length() == 0 {
-				return
-			}
+		courseCode := strings.TrimSpace(cells.Eq(0).Text())
+		if courseCode == "" {
+			return
+		}
 
-			entry := models.MarksEntry{}
+		entry := models.MarksEntry{
+			CourseCode:  courseCode,
+			CourseTitle: findCourseTitle(titleLookup, courseCode),
+			Assessments: extractAssessmentsFromCell(cells.Eq(2)),
+		}
+
+		if entry.Assessments == nil {
 			entry.Assessments = []models.MarksAssessment{}
+		}
 
-			cells.Each(func(idx int, cell *goquery.Selection) {
-				text := strings.TrimSpace(cell.Text())
-				switch idx {
-				case codeIdx:
-					entry.CourseCode = text
-				case titleIdx:
-					entry.CourseTitle = text
-				case totalIdx:
-					if f, ok := parseFloatValue(text); ok {
-						entry.Total = floatPointer(f)
-					}
-				default:
-					if name, ok := assessmentCols[idx]; ok && text != "" {
-						score, max := parseScoreMax(text)
-						entry.Assessments = append(entry.Assessments, models.MarksAssessment{
-							Name:  fallbackAssessmentName(name),
-							Score: score,
-							Max:   max,
-						})
-					}
-				}
-			})
-
-			if entry.CourseCode != "" || entry.CourseTitle != "" {
-				entries = append(entries, entry)
-			}
-		})
+		entries = append(entries, entry)
 	})
 
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("marks table not found")
+		return nil, fmt.Errorf("marks entries not found")
 	}
+
 	return entries, nil
 }
 
+func buildCourseTitleLookup(html string) map[string]string {
+	lookup := map[string]string{}
+	attendanceEntries, err := ParseAttendance(html)
+	if err != nil {
+		return lookup
+	}
+
+	for _, entry := range attendanceEntries {
+		key := canonicalCourseCode(entry.CourseCode)
+		if key == "" {
+			continue
+		}
+		lookup[key] = entry.CourseTitle
+	}
+	return lookup
+}
+
+func findCourseTitle(lookup map[string]string, courseCode string) string {
+	if len(lookup) == 0 {
+		return ""
+	}
+
+	key := canonicalCourseCode(courseCode)
+	if title, ok := lookup[key]; ok {
+		return title
+	}
+
+	upper := strings.ToUpper(strings.TrimSpace(courseCode))
+	if title, ok := lookup[upper]; ok {
+		return title
+	}
+
+	return ""
+}
+
+func canonicalCourseCode(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ""
+	}
+	upper := strings.ToUpper(code)
+	if strings.HasSuffix(upper, "REGULAR") {
+		return strings.TrimSpace(upper[:len(upper)-len("REGULAR")])
+	}
+	return upper
+}
+
+func extractAssessmentsFromCell(cell *goquery.Selection) []models.MarksAssessment {
+	var assessments []models.MarksAssessment
+	inner := cell.Find("table").First()
+	if inner.Length() == 0 {
+		inner = cell
+	}
+
+	inner.Find("td").Each(func(_ int, assessmentCell *goquery.Selection) {
+		nameRaw := strings.TrimSpace(assessmentCell.Find("strong").First().Text())
+		if nameRaw == "" {
+			return
+		}
+		if assessment := parseAssessmentCell(assessmentCell); assessment != nil {
+			assessments = append(assessments, *assessment)
+		}
+	})
+	return assessments
+}
+
+func parseAssessmentCell(cell *goquery.Selection) *models.MarksAssessment {
+	nameRaw := strings.TrimSpace(cell.Find("strong").First().Text())
+	if nameRaw == "" {
+		return nil
+	}
+
+	name, max := parseAssessmentNameAndMax(nameRaw)
+
+	rawText := strings.TrimSpace(cell.Text())
+	scoreText := strings.TrimSpace(strings.TrimPrefix(rawText, nameRaw))
+	var score *float64
+	if scoreText != "" {
+		parts := strings.Fields(scoreText)
+		if len(parts) > 0 {
+			scoreStr := parts[0]
+			if !strings.EqualFold(scoreStr, "abs") {
+				if parsed, ok := parseFloatValue(scoreStr); ok {
+					score = floatPointer(parsed)
+				}
+			}
+		}
+	}
+
+	return &models.MarksAssessment{
+		Name:  fallbackAssessmentName(name),
+		Score: score,
+		Max:   max,
+	}
+}
+
+func parseAssessmentNameAndMax(raw string) (string, *float64) {
+	parts := strings.SplitN(raw, "/", 2)
+	name := strings.TrimSpace(parts[0])
+	var max *float64
+	if len(parts) > 1 {
+		if parsed, ok := parseFloatValue(parts[1]); ok {
+			max = floatPointer(parsed)
+		}
+	}
+	return name, max
+}
+
+func findMarksTable(doc *goquery.Document) *goquery.Selection {
+	var table *goquery.Selection
+	doc.Find("p").EachWithBreak(func(_ int, p *goquery.Selection) bool {
+		text := strings.ToLower(strings.TrimSpace(p.Text()))
+		if !strings.Contains(text, "internal marks detail") {
+			return true
+		}
+
+		current := p
+		for current.Length() > 0 {
+			if current.Is("table") {
+				table = current
+				return false
+			}
+			current = current.Next()
+		}
+		return true
+	})
+
+	if table == nil {
+		table = findMarksTableFallback(doc)
+	}
+	return table
+}
+
+func findMarksTableFallback(doc *goquery.Document) *goquery.Selection {
+	var fallback *goquery.Selection
+	doc.Find("table").EachWithBreak(func(_ int, table *goquery.Selection) bool {
+		headerText := strings.ToLower(strings.TrimSpace(table.Find("tr").First().Text()))
+		if strings.Contains(headerText, "course code") && strings.Contains(headerText, "test performance") {
+			fallback = table
+			return false
+		}
+		return true
+	})
+	return fallback
+}
 func parseFloatValue(input string) (float64, bool) {
 	value := strings.TrimSpace(strings.ReplaceAll(input, ",", ""))
 	value = strings.TrimSpace(strings.TrimSuffix(value, "%"))
