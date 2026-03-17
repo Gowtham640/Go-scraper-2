@@ -175,7 +175,17 @@ async function loginWithContext(entry, email, password) {
       console.error('🔄 STEP 11: Waiting for password field to appear...');
       console.error('🔑 Password input selector: #password (inside iframe)');
       const step11Start = Date.now();
-      await signinFrame.locator('#password').waitFor();
+      try {
+        await signinFrame.locator('#password').waitFor();
+      } catch (waitErr) {
+        console.error('⚠️ Password field wait timed out, invoking stabilizer...');
+        const stabilized = await stabilizePasswordField(page, signinFrame);
+        if (!stabilized) {
+          console.error('❌ Stabilizer could not recover password visibility');
+          throw waitErr;
+        }
+        await signinFrame.locator('#password').waitFor({ timeout: 10000 });
+      }
       console.error('✅ Password field appeared');
       console.error(`⏱️  Step 11 duration: ${Date.now() - step11Start}ms`);
       console.error('');
@@ -691,6 +701,83 @@ async function detectState(page) {
   }
 
   return { state: 'unknown', reason: 'no known state detected', url };
+}
+
+async function describePasswordVisibility(locator) {
+  try {
+    return await locator.evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      const isVisible = style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        parseFloat(style.opacity || '1') > 0 &&
+        rect.width > 1 &&
+        rect.height > 1 &&
+        el.offsetParent !== null;
+      return {
+        isVisible,
+        width: rect.width,
+        height: rect.height,
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        offsetParent: el.offsetParent !== null
+      };
+    });
+  } catch (err) {
+    console.error('⚠️ describePasswordVisibility failed:', err.message);
+    return {
+      isVisible: false,
+      width: 0,
+      height: 0,
+      display: 'unknown',
+      visibility: 'unknown',
+      opacity: '0',
+      offsetParent: false
+    };
+  }
+}
+
+async function stabilizePasswordField(page, frameLocator, attempts = 3, waitMs = 1500) {
+  console.error('🛠 Password stabilizer invoked');
+  const locator = frameLocator.locator('#password');
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const state = await describePasswordVisibility(locator);
+    console.error(`🧭 Stabilizer attempt ${attempt}: visible=${state.isVisible} width=${state.width} height=${state.height} display=${state.display}`);
+    if (state.isVisible) {
+      console.error('🧘 Password already visible, stabilizer complete');
+      return true;
+    }
+    try {
+      await locator.evaluate(el => {
+        const container = document.getElementById('password_container') || el.closest('.getpassword');
+        if (container) {
+          container.style.display = 'block';
+          container.style.visibility = 'visible';
+          container.style.opacity = '1';
+          container.style.height = 'auto';
+          container.style.minHeight = '44px';
+        }
+        if (el.parentElement) {
+          el.parentElement.style.display = 'block';
+          el.parentElement.style.opacity = '1';
+        }
+        el.style.display = 'block';
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+        el.style.width = '100%';
+        el.style.height = '40px';
+        el.style.transform = 'none';
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+      });
+    } catch (evalErr) {
+      console.error('⚠️ Password stabilizer adjustment failed:', evalErr.message);
+    }
+    await page.waitForTimeout(waitMs);
+  }
+  const finalState = await describePasswordVisibility(locator);
+  console.error(`🧭 Stabilizer final state: visible=${finalState.isVisible} width=${finalState.width} height=${finalState.height}`);
+  return finalState.isVisible;
 }
 
 function hasCriticalCookies(cookies) {
