@@ -36,6 +36,7 @@ export PORT
 log "start.sh invoked (cwd: $(pwd))"
 log "Configured ports: GO_SERVER=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
 
+
 ########################################
 # START GO SERVER
 ########################################

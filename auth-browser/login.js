@@ -443,12 +443,13 @@ async function loginWithContext(entry, email, password) {
           console.error('❌ LOGIN FAILED: Not on expected success page');
           throw new Error('LOGIN_FAILED');
         } else {
-          console.error('🎉 LOGIN SUCCESS: Already on portal page');
-        }
-      }
+      console.error('🎉 LOGIN SUCCESS: Already on portal page');
+    }
+  }
 
-      console.error('');
-      const currentUrl = await ensureDashboardUrl(page);
+  console.error('');
+  await stabilizeNavigation(page);
+  const currentUrl = await ensureDashboardUrl(page);
       const currentHash = await page.evaluate(() => window.location.hash).catch(() => '');
       console.error(`🔍 Current location hash before cookie extraction: ${currentHash}`);
       if (!isDashboardUrl(currentUrl)) {
@@ -458,8 +459,10 @@ async function loginWithContext(entry, email, password) {
 
       console.error('🔄 STEP 15: Extracting session cookies...');
       const cookieExtractStart = Date.now();
-      const cookies = await context.cookies();
+      let cookies = await context.cookies();
       console.error(`🍪 Found ${cookies.length} cookies from browser context`);
+      cookies = await retryCookieExtraction(context,page, cookies);
+      console.error(`🍪 Final cookie count after retry validation: ${cookies.length}`);
       let pageCookies = [];
       try {
         pageCookies = await page.context().cookies();
@@ -608,6 +611,118 @@ async function handleSigninBlock(page, timeoutMs = 20000) {
     console.error('⚠️ Redirect after signin block continue did not happen in time');
     throw new Error('SIGNIN_BLOCK_REDIRECT_FAILED');
   }
+}
+
+async function stabilizeNavigation(page, maxCycles = 5, waitMs = 1000) {
+  console.error('🛡️ Navigation stabilizer triggered');
+  for (let attempt = 1; attempt <= maxCycles; attempt++) {
+    const state = await detectState(page);
+    console.error(`🧭 Stabilizer detected state: ${state.state} (${state.reason})`);
+    if (state.state === 'portal') {
+      const cookies = await page.context().cookies();
+    
+      if (hasCriticalCookies(cookies)) {
+        return state;
+      }
+    
+      console.error('⚠️ Portal reached but cookies not ready, waiting...');
+      await page.waitForTimeout(2000);
+      continue;
+    }
+
+    if (state.state === 'unknown') {
+      console.error('⚠️ Unknown state, waiting for stabilization...');
+      await Promise.race([
+        page.waitForLoadState('networkidle'),
+        page.waitForTimeout(1500)
+      ]);
+      continue;
+    }
+    if (state.state === 'signin-block') {
+      console.error('🧭 Stabilizer: Re-running signin block handler');
+      await handleSigninBlock(page, 10000);
+    } else if (state.state === 'session-limit' || state.state === 'session-reminder') {
+      console.error('🧭 Stabilizer: Re-running preannouncement handler');
+      await handlePreannouncement(page);
+    } else {
+      console.error('🧘 Stabilizer: No action mapped for this state');
+      return state;
+    }
+    await page.waitForTimeout(waitMs);
+  }
+  const fallbackState = await detectState(page);
+  console.error(`🧭 Stabilizer final state after retries: ${fallbackState.state}`);
+  return fallbackState;
+}
+
+async function detectState(page) {
+  const url = page.url();
+  let continueVisible = false;
+  let remindVisible = false;
+  let terminateVisible = false;
+  try {
+    const [
+      continueCount,
+      remindCount,
+      terminateCount
+    ] = await Promise.all([
+      page.locator('a#continue_button, a.blue_btn.continue_button#continue_button, #continue_button').count(),
+      page.locator('a.remind_me_later').count(),
+      page.getByText('Terminate All Sessions').count()
+    ]);
+    continueVisible = continueCount > 0;
+    remindVisible = remindCount > 0;
+    terminateVisible = terminateCount > 0;
+  } catch (err) {
+    console.error('⚠️ detectState DOM scan failed:', err.message);
+  }
+
+  if ((continueVisible && url.includes('/announcement/signin-block')) || url.includes('/announcement/signin-block')) {
+    return { state: 'signin-block', reason: 'signin block matched', url };
+  }
+  if (remindVisible || url.includes('/announcement/sessions-reminder')) {
+    return { state: 'session-reminder', reason: 'session reminder matched', url };
+  }
+  if (terminateVisible || url.includes('/preannouncement/block-sessions') || url.includes('/block-sessions')) {
+    return { state: 'session-limit', reason: 'session limit matched', url };
+  }
+  if (url.includes('/portal/academia-academic-services') || url.includes('#WELCOME') || isRootDomain(url)) {
+    return { state: 'portal', reason: 'dashboard URL matched', url };
+  }
+
+  return { state: 'unknown', reason: 'no known state detected', url };
+}
+
+function hasCriticalCookies(cookies) {
+  const cookieNames = cookies.map(cookie => cookie.name);
+  const hasIamcsr = cookieNames.includes('iamcsr');
+  const hasWmsToken = cookieNames.some(name => /^wms-tkp-token_/i.test(name));
+  return hasIamcsr && hasWmsToken;
+}
+
+async function retryCookieExtraction(context, page,initialCookies, maxRetries = 3) {
+  let cookies = initialCookies;
+  if (hasCriticalCookies(cookies)) {
+    return cookies;
+  }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    console.error(`⚠️ Critical cookies missing, retry attempt ${attempt}/${maxRetries}`);
+    await page.waitForLoadState('domcontentloaded');
+    await delay(2000);
+    cookies = await context.cookies();
+    if (hasCriticalCookies(cookies)) {
+      console.error('✅ Critical cookies recovered via retry');
+      return cookies;
+    }
+  }
+
+  console.error('❌ Critical cookies still missing after retries');
+  return cookies;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function resetPageForNextJob(page) {
