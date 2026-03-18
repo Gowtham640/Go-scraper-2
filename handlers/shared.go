@@ -212,12 +212,36 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 			RequestedDataTypes: []string{dataType},
 		}
 	} else {
-		logger.InfoWithUser(email, handlerName, "Token valid, enqueuing fetch job", nil)
-		jobReq = models.JobCreateRequest{
-			UserID:   userID,
-			JobType:  "fetch",
-			DataType: dataType,
-			Priority: 10,
+		missingCritical := auth.GetMissingCriticalCookies(tokenData.Tokens)
+		if len(missingCritical) > 0 {
+			if req.Password == "" {
+				logger.WarnWithUser(email, handlerName, "Missing critical tokens but no password provided", map[string]interface{}{
+					"missing_tokens": missingCritical,
+				})
+				respondFailure(w, "fail")
+				return
+			}
+
+			logger.WarnWithUser(email, handlerName, "Critical tokens missing, enqueuing login job", map[string]interface{}{
+				"missing_tokens": missingCritical,
+			})
+			jobReq = models.JobCreateRequest{
+				UserID:             userID,
+				JobType:            "login",
+				DataType:           "auth",
+				Priority:           100,
+				Email:              email,
+				Password:           req.Password,
+				RequestedDataTypes: initialRequested,
+			}
+		} else {
+			logger.InfoWithUser(email, handlerName, "Token valid, enqueuing fetch job", nil)
+			jobReq = models.JobCreateRequest{
+				UserID:   userID,
+				JobType:  "fetch",
+				DataType: dataType,
+				Priority: 10,
+			}
 		}
 	}
 
