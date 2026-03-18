@@ -902,7 +902,7 @@ func (w *Worker) enqueueLoginJobForUser(userID, dataType string) {
 
 	email, err := w.db.GetUserEmail(userID)
 	if err != nil {
-		logger.Warn("execute_fetch_job", "Could not determine user email for login fallback", err, map[string]interface{}{
+		logger.Warn("execute_fetch_job", fmt.Sprintf("Could not determine user email for login fallback: %v", err), map[string]interface{}{
 			"user_id": userID,
 		})
 		email = ""
