@@ -36,7 +36,38 @@ export PORT
 log "start.sh invoked (cwd: $(pwd))"
 log "Configured ports: GO_SERVER=${PORT}, AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT}"
 
+########################################
+# PORT CLEANUP (ADDITIONAL - NON-DESTRUCTIVE)
+########################################
 
+cleanup_port() {
+  local PORT_TO_CLEAN=$1
+
+  log "🧹 Checking port ${PORT_TO_CLEAN}..."
+
+  # Get PID using port (Windows Git Bash compatible)
+  PID=$(netstat -ano 2>/dev/null | grep ":${PORT_TO_CLEAN}" | grep LISTENING | awk '{print $5}' | head -n 1 || true)
+
+  if [[ -n "${PID}" ]]; then
+    log "⚠️ Port ${PORT_TO_CLEAN} is in use by PID ${PID}, killing..."
+
+    # Use winpty for Git Bash compatibility
+    winpty taskkill //PID "${PID}" //F >/dev/null 2>&1 || true
+
+    sleep 1
+
+    log "✅ Port ${PORT_TO_CLEAN} cleaned"
+  else
+    log "✅ Port ${PORT_TO_CLEAN} is free"
+  fi
+}
+
+########################################
+# RUN PORT CLEANUP BEFORE START
+########################################
+
+cleanup_port "${PORT}"
+cleanup_port "${AUTH_SERVICE_PORT}"
 ########################################
 # START GO SERVER
 ########################################
