@@ -364,6 +364,41 @@ func (s *SupabaseClient) GetUserBatch(userID string) (string, error) {
 	return batch, nil
 }
 
+// GetUserEmail retrieves the registered email for a user ID from the users table
+func (s *SupabaseClient) GetUserEmail(userID string) (string, error) {
+	logger.Info("get_user_email", "Fetching user email", map[string]interface{}{
+		"user_id": userID,
+	})
+
+	var result []map[string]interface{}
+	_, err := s.client.From("users").
+		Select("email", "", false).
+		Eq("id", userID).
+		ExecuteTo(&result)
+
+	if err != nil {
+		logger.Error("get_user_email", "Failed to fetch user email", err, nil)
+		return "", err
+	}
+
+	if len(result) == 0 {
+		logger.Warn("get_user_email", "User not found when fetching email", map[string]interface{}{
+			"user_id": userID,
+		})
+		return "", fmt.Errorf("user not found")
+	}
+
+	email, ok := result[0]["email"].(string)
+	if !ok {
+		return "", fmt.Errorf("email field missing")
+	}
+
+	logger.Info("get_user_email", "User email retrieved", map[string]interface{}{
+		"user_id": userID,
+	})
+	return email, nil
+}
+
 // GetUserCache retrieves cached data for a user by data_type
 func (s *SupabaseClient) GetUserCache(userID, dataType string) (interface{}, error) {
 	logger.Info("get_user_cache", "Fetching user cache", map[string]interface{}{
