@@ -104,7 +104,7 @@ func main() {
 	// Create job manager
 	jobManager := jobs.NewManager(db, jobWorker)
 	logger.Info("job_manager_init", "Job manager initialized", nil)
-	attendanceScheduler := scheduler.NewAttendanceScheduler(jobManager, db)
+	attendanceScheduler := scheduler.NewAttendanceScheduler(db, cfg.CronIntervalMinutes, cfg.CronBatchSize)
 	attendanceScheduler.Start()
 	logger.Info("attendance_scheduler_init", "Attendance scheduler started", nil)
 

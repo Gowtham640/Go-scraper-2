@@ -280,6 +280,8 @@ type AttendanceDelta struct {
 	UserID              string    `json:"userId"`
 	CourseCode          string    `json:"courseCode"`
 	Slot                string    `json:"slot,omitempty"` // set in worker for logs / timetable match; not stored in attendance_deltas unless column exists
+	PrevFetchedAt       time.Time `json:"-"`              // snapshot times for tentative source range; not stored in DB unless column exists
+	CurrFetchedAt       time.Time `json:"-"`
 	PrevHoursAbsent     int       `json:"prevHoursAbsent"`
 	PrevHoursConducted  int       `json:"prevHoursConducted"`
 	CurrHoursAbsent     int       `json:"currHoursAbsent"`
@@ -303,6 +305,9 @@ type TentativeAttendanceEvent struct {
 	Status               string    `json:"status"` // PENDING | REVERTED | CONFIRMED
 	InferredAt           time.Time `json:"inferredAt"`
 	ExpiresAt            time.Time `json:"expiresAt"`
+	ConfidenceScore      float64   `json:"confidenceScore"`
+	IsAmbiguous          bool      `json:"isAmbiguous"`
+	SourceSnapshotRange  string    `json:"sourceSnapshotRange,omitempty"` // PostgreSQL tstzrange literal for API
 }
 
 // FinalAttendanceEvent represents a confirmed attendance assignment

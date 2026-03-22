@@ -2,7 +2,7 @@ package worker
 
 import (
 	"fmt"
-	"math"
+	"strings"
 	"time"
 
 	"srm-academia-scraper/logger"
@@ -168,6 +168,8 @@ func (p *attendanceProcessor) computeDeltas(jobID, userID string, entries []mode
 			UserID:              userID,
 			CourseCode:          entry.CourseCode,
 			Slot:                entry.Slot,
+			PrevFetchedAt:       prev.FetchedAt,
+			CurrFetchedAt:       curr.FetchedAt,
 			PrevHoursAbsent:     prev.HoursAbsent,
 			PrevHoursConducted:  prev.HoursConducted,
 			CurrHoursAbsent:     curr.HoursAbsent,
@@ -222,6 +224,7 @@ func (p *attendanceProcessor) createTentatives(jobID string, deltas []models.Att
 	}
 
 	start, end := candidateWindow(fetchedAt)
+	onDate := truncateToDate(fetchedAt)
 	created := 0
 	for _, delta := range deltas {
 		if delta.DeltaType != models.DeltaTypeAddition && delta.DeltaType != models.DeltaTypeMixed {
@@ -246,29 +249,65 @@ func (p *attendanceProcessor) createTentatives(jobID string, deltas []models.Att
 			continue
 		}
 
-		schedule, schedErr := p.db.GetCourseSchedule(delta.CourseCode)
-		if schedErr != nil {
-			logger.Warn("tentative_creation", "Could not load course_schedule for timetable match log", map[string]interface{}{
-				"job_id": jobID, "course": delta.CourseCode, "error": schedErr.Error(),
+		subject9, suffix := parseAttendanceCourseKey(delta.CourseCode)
+		logger.Info("tentative_creation", "Parsed attendance course key for timetable match", map[string]interface{}{
+			"job_id": jobID, "user_id": delta.UserID, "raw_course": delta.CourseCode,
+			"subject_code_9": subject9, "suffix": suffix,
+		})
+
+		ttDay, dayOrderLabel, calErr := p.db.ResolveTimetableDayFromPublicCalendar(delta.UserID, onDate)
+		if calErr != nil {
+			logger.Warn("tentative_creation", "Calendar day_order resolution failed", map[string]interface{}{
+				"job_id": jobID, "user_id": delta.UserID, "on_date": onDate.Format("2006-01-02"), "error": calErr.Error(),
+			})
+		} else {
+			logger.Info("tentative_creation", "Calendar mapped date to timetable day index", map[string]interface{}{
+				"job_id": jobID, "timetable_day": ttDay, "day_order": dayOrderLabel,
 			})
 		}
-		todayH, yestH := expectedSlotHoursOnDays(schedule, delta.Slot, fetchedAt)
-		matchToday := todayH > 0 && int(math.Round(todayH)) == delta.DeltaHoursConducted
-		matchYest := yestH > 0 && int(math.Round(yestH)) == delta.DeltaHoursConducted
-		confidence := 0.0
-		if matchToday || matchYest {
-			confidence = 1.0
-		} else if todayH > 0 || yestH > 0 {
-			ref := math.Max(todayH, yestH)
-			if ref > 0 {
-				confidence = math.Max(0, 1.0-math.Abs(float64(delta.DeltaHoursConducted)-ref)/ref)
-			}
+
+		tt, ttErr := p.db.GetTimetableDataFromUserCache(delta.UserID)
+		if ttErr != nil {
+			logger.Warn("tentative_creation", "user_cache timetable missing or invalid", map[string]interface{}{
+				"job_id": jobID, "user_id": delta.UserID, "error": ttErr.Error(),
+			})
 		}
-		logger.Info("tentative_creation", "Timetable vs delta_conducted (log-only confidence)", map[string]interface{}{
-			"job_id": jobID, "course": delta.CourseCode, "slot": delta.Slot,
-			"delta_conducted": delta.DeltaHoursConducted, "expected_hours_today": todayH, "expected_hours_yesterday": yestH,
-			"match_today": matchToday, "match_yesterday": matchYest, "confidence_estimate": confidence,
+
+		occurrences := 0
+		if calErr == nil && ttErr == nil && ttDay > 0 && tt != nil {
+			occurrences = timetableSubjectOccurrencesOnDay(tt, ttDay, subject9, suffix)
+		}
+		logger.Info("tentative_creation", "Counted timetable cells matching subject+suffix for day", map[string]interface{}{
+			"job_id": jobID, "timetable_day": ttDay, "occurrences": occurrences,
+			"delta_conducted": delta.DeltaHoursConducted,
 		})
+
+		confidence := 0.0
+		ambiguous := true
+		if calErr == nil && ttErr == nil && ttDay > 0 {
+			if occurrences == delta.DeltaHoursConducted {
+				confidence = 1.0
+				ambiguous = false
+				logger.Info("tentative_creation", "Confidence 1: delta_conducted matches timetable occurrence count", map[string]interface{}{
+					"job_id": jobID, "course": delta.CourseCode, "count": occurrences,
+				})
+			} else {
+				logger.Info("tentative_creation", "Confidence 0: mismatch between delta_conducted and timetable count", map[string]interface{}{
+					"job_id": jobID, "occurrences": occurrences, "delta_conducted": delta.DeltaHoursConducted,
+				})
+			}
+		} else {
+			logger.Warn("tentative_creation", "Marking ambiguous: incomplete calendar or timetable data", map[string]interface{}{
+				"job_id": jobID, "calendar_ok": calErr == nil, "timetable_ok": ttErr == nil, "tt_day": ttDay,
+			})
+		}
+
+		snapRange := formatSourceSnapshotRange(delta.PrevFetchedAt, delta.CurrFetchedAt)
+		if snapRange != "" {
+			logger.Info("tentative_creation", "Source snapshot tstzrange for DB", map[string]interface{}{
+				"job_id": jobID, "range": snapRange,
+			})
+		}
 
 		tentative := models.TentativeAttendanceEvent{
 			UserID:               delta.UserID,
@@ -280,6 +319,9 @@ func (p *attendanceProcessor) createTentatives(jobID string, deltas []models.Att
 			Status:               models.TentativeStatusPending,
 			InferredAt:           fetchedAt,
 			ExpiresAt:            fetchedAt.Add(time.Duration(tentativeExpirationHours) * time.Hour),
+			ConfidenceScore:      confidence,
+			IsAmbiguous:          ambiguous,
+			SourceSnapshotRange:  snapRange,
 		}
 
 		if err := p.db.InsertTentativeAttendanceEvent(tentative); err != nil {
@@ -360,6 +402,7 @@ func (p *attendanceProcessor) revertTentatives(jobID, userID, courseCode string,
 			return err
 		}
 
+		// Carry forward inference metadata from the split tentative so DB stays consistent.
 		newTentative := models.TentativeAttendanceEvent{
 			UserID:               tentative.UserID,
 			CourseCode:           tentative.CourseCode,
@@ -370,6 +413,9 @@ func (p *attendanceProcessor) revertTentatives(jobID, userID, courseCode string,
 			Status:               models.TentativeStatusPending,
 			InferredAt:           now,
 			ExpiresAt:            now.Add(time.Duration(tentativeExpirationHours) * time.Hour),
+			ConfidenceScore:      tentative.ConfidenceScore,
+			IsAmbiguous:          tentative.IsAmbiguous,
+			SourceSnapshotRange:  tentative.SourceSnapshotRange,
 		}
 
 		if err := p.db.InsertTentativeAttendanceEvent(newTentative); err != nil {
@@ -584,4 +630,81 @@ func durationHoursFromScheduleTimes(start, end string) float64 {
 		return 0
 	}
 	return sec / 3600.0
+}
+
+// parseAttendanceCourseKey splits keys like "21MAB204TRegular" into a 9-char subject code and a type suffix.
+func parseAttendanceCourseKey(full string) (subject9, suffix string) {
+	full = strings.TrimSpace(full)
+	if full == "" {
+		return "", ""
+	}
+	if len(full) <= 9 {
+		return full, ""
+	}
+	return full[:9], full[9:]
+}
+
+// slotMatchesSuffix maps attendance suffixes (Regular, Lab, ...) to timetable slotType/courseType text.
+func slotMatchesSuffix(slot *models.TimetableSlot, suffix string) bool {
+	if suffix == "" {
+		return true
+	}
+	su := strings.ToLower(strings.TrimSpace(suffix))
+	st := strings.ToLower(slot.SlotType)
+	ct := strings.ToLower(slot.CourseType)
+	switch {
+	case strings.Contains(su, "lab"):
+		return strings.Contains(st, "lab") || strings.Contains(ct, "lab")
+	case strings.Contains(su, "regular") || strings.Contains(su, "theory"):
+		return st == "theory" || strings.Contains(ct, "theory")
+	case strings.Contains(su, "project"):
+		return strings.Contains(ct, "project")
+	default:
+		return strings.Contains(st, su) || strings.Contains(ct, su)
+	}
+}
+
+// timetableSubjectOccurrencesOnDay counts non-nil table cells matching subject9 and suffix on the given schedule day.
+func timetableSubjectOccurrencesOnDay(tt *models.TimetableData, day int, subject9, suffix string) int {
+	if tt == nil || day < 1 {
+		return 0
+	}
+	var dayTable *models.TimetableDay
+	for i := range tt.Schedule {
+		if tt.Schedule[i].Day == day {
+			dayTable = &tt.Schedule[i]
+			break
+		}
+	}
+	if dayTable == nil {
+		return 0
+	}
+	n := 0
+	for _, cell := range dayTable.Table {
+		if cell == nil {
+			continue
+		}
+		codePrefix := strings.TrimSpace(cell.Code)
+		if len(codePrefix) >= 9 {
+			codePrefix = codePrefix[:9]
+		}
+		if codePrefix != subject9 {
+			continue
+		}
+		if !slotMatchesSuffix(cell, suffix) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// formatSourceSnapshotRange builds a PostgreSQL tstzrange string for the two snapshot fetch times (half-open).
+func formatSourceSnapshotRange(prev, curr time.Time) string {
+	if prev.IsZero() || curr.IsZero() {
+		return ""
+	}
+	a := prev.UTC().Format(time.RFC3339)
+	b := curr.UTC().Format(time.RFC3339)
+	return fmt.Sprintf("[%s,%s)", a, b)
 }
