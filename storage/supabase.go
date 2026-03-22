@@ -91,26 +91,45 @@ func (s *SupabaseClient) UpsertUser(userID, email string, userInfo *models.UserI
 
 // SaveUserEncryptedPassword encrypts plaintext with AES-GCM and upserts public.users (encrypted_password, password_iv, password_tag).
 func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext string) error {
+	logger.Info("save_user_encrypted_password", "flow start", map[string]interface{}{
+		"user_id":                   userID,
+		"email":                     email,
+		"plaintext_password_nonempty": plaintext != "",
+		"encryption_key_configured":   len(s.passwordKey) > 0,
+	})
 	if userID == "" {
+		logger.Error("save_user_encrypted_password", "abort: user id empty", nil, nil)
 		return fmt.Errorf("user id required")
 	}
 	if email == "" {
+		logger.Error("save_user_encrypted_password", "abort: email empty", nil, map[string]interface{}{"user_id": userID})
 		return fmt.Errorf("email required")
 	}
 	if plaintext == "" {
+		logger.Error("save_user_encrypted_password", "abort: password plaintext empty", nil, map[string]interface{}{"user_id": userID})
 		return fmt.Errorf("empty password")
 	}
 	if len(s.passwordKey) == 0 {
+		logger.Error("save_user_encrypted_password", "abort: PASSWORD_KEY not loaded on client", nil, map[string]interface{}{"user_id": userID})
 		return fmt.Errorf("password key not configured")
 	}
 
+	logger.Info("save_user_encrypted_password", "encrypt: invoking AES-GCM", map[string]interface{}{
+		"user_id": userID,
+	})
 	encB64, ivB64, tagB64, err := passcrypt.EncryptAESGCM(plaintext, s.passwordKey)
 	if err != nil {
-		logger.Error("save_user_encrypted_password", "Encrypt failed", err, map[string]interface{}{
+		logger.Error("save_user_encrypted_password", "encrypt: AES-GCM failed", err, map[string]interface{}{
 			"user_id": userID,
 		})
 		return err
 	}
+	logger.Info("save_user_encrypted_password", "encrypt: succeeded", map[string]interface{}{
+		"user_id":            userID,
+		"ciphertext_b64_len": len(encB64),
+		"nonce_b64_len":      len(ivB64),
+		"tag_b64_len":        len(tagB64),
+	})
 
 	// Upsert so a row exists even before profile fields are filled by FetchUserInfo.
 	data := map[string]interface{}{
@@ -122,17 +141,20 @@ func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext stri
 		"password_tag":       tagB64,
 	}
 
+	logger.Info("save_user_encrypted_password", "upsert: posting to public.users", map[string]interface{}{
+		"user_id": userID,
+	})
 	var result []map[string]interface{}
 	_, err = s.client.From("users").Upsert(data, "", "", "").ExecuteTo(&result)
 
 	if err != nil {
-		logger.Error("save_user_encrypted_password", "Failed to upsert users row", err, map[string]interface{}{
+		logger.Error("save_user_encrypted_password", "upsert: Supabase request failed", err, map[string]interface{}{
 			"user_id": userID,
 		})
 		return err
 	}
 
-	logger.Info("save_user_encrypted_password", "Stored encrypted password fields", map[string]interface{}{
+	logger.Info("save_user_encrypted_password", "upsert: completed OK (encrypted_password, password_iv, password_tag)", map[string]interface{}{
 		"user_id": userID,
 	})
 	return nil
@@ -140,10 +162,25 @@ func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext stri
 
 // DecryptStoredPassword decrypts public.users password fields using the same PASSWORD_KEY as SaveUserEncryptedPassword.
 func (s *SupabaseClient) DecryptStoredPassword(encryptedPasswordB64, passwordIVB64, passwordTagB64 string) (string, error) {
+	logger.Info("decrypt_stored_password", "flow start", map[string]interface{}{
+		"encryption_key_configured": len(s.passwordKey) > 0,
+		"ciphertext_b64_nonempty":   encryptedPasswordB64 != "",
+		"nonce_b64_nonempty":        passwordIVB64 != "",
+		"tag_b64_nonempty":          passwordTagB64 != "",
+	})
 	if len(s.passwordKey) == 0 {
+		logger.Error("decrypt_stored_password", "abort: password key not configured", nil, nil)
 		return "", fmt.Errorf("password key not configured")
 	}
-	return passcrypt.DecryptAESGCM(encryptedPasswordB64, passwordIVB64, passwordTagB64, s.passwordKey)
+	plain, err := passcrypt.DecryptAESGCM(encryptedPasswordB64, passwordIVB64, passwordTagB64, s.passwordKey)
+	if err != nil {
+		logger.Error("decrypt_stored_password", "decrypt: AES-GCM Open failed", err, nil)
+		return "", err
+	}
+	logger.Info("decrypt_stored_password", "decrypt: succeeded", map[string]interface{}{
+		"plaintext_len": len(plain),
+	})
+	return plain, nil
 }
 
 // UpsertToken stores or updates session tokens in public.tokens table

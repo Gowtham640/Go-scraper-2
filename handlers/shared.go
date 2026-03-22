@@ -179,6 +179,21 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 
 	logger.InfoWithUser(email, handlerName, "Cache metadata", cacheInfo)
 
+	// Data routes always include password; persist it even when only a fetch job runs.
+	logger.InfoWithUser(email, handlerName, "password_persist: invoking encrypted upsert (password from JSON body)", map[string]interface{}{
+		"user_id": userID,
+	})
+	if err := jobManager.SaveUserEncryptedPassword(userID, email, req.Password); err != nil {
+		logger.ErrorWithUser(email, handlerName, "password_persist: encrypted upsert failed", err, map[string]interface{}{
+			"user_id": userID,
+			"step":    "SaveUserEncryptedPassword",
+		})
+	} else {
+		logger.InfoWithUser(email, handlerName, "password_persist: encrypted upsert finished without error", map[string]interface{}{
+			"user_id": userID,
+		})
+	}
+
 	tokenData, tokenErr := jobManager.GetToken(userID)
 	now := time.Now()
 

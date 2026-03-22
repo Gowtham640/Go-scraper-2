@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"srm-academia-scraper/logger"
@@ -80,9 +81,11 @@ func (s *SupabaseClient) InsertAttendanceSnapshot(userID string, entry models.At
 		"fetchedat":            fetchedAt.Format(time.RFC3339),
 	}
 
+	// postgrest ExecuteTo must decode into a slice; INSERT returns a JSON array.
+	var insResult []map[string]interface{}
 	_, err := s.client.From("attendance_snapshots").
 		Insert(row, false, "", "", "").
-		ExecuteTo(&map[string]interface{}{})
+		ExecuteTo(&insResult)
 	if err != nil {
 		logger.Error("insert_attendance_snapshot", "Failed to insert attendance snapshot", err, map[string]interface{}{
 			"user_id": userID,
@@ -90,28 +93,46 @@ func (s *SupabaseClient) InsertAttendanceSnapshot(userID string, entry models.At
 		})
 		return err
 	}
+	logger.Info("insert_attendance_snapshot", "Snapshot row accepted by API", map[string]interface{}{
+		"user_id": userID,
+		"course":  entry.CourseCode,
+		"slot":    safeString(entry.Slot),
+	})
 
 	return nil
 }
 
-// GetAttendanceSnapshots fetches the most recent snapshots for a user-course pair.
-func (s *SupabaseClient) GetAttendanceSnapshots(userID, courseCode string, limit int) ([]models.AttendanceSnapshot, error) {
+// GetAttendanceSnapshots fetches the most recent snapshots for a user-course pair, optionally scoped to one timetable slot.
+// When slot is non-empty, only rows for that slot are considered (correct pairing for deltas).
+func (s *SupabaseClient) GetAttendanceSnapshots(userID, courseCode, slot string, limit int) ([]models.AttendanceSnapshot, error) {
 	var rows []map[string]interface{}
-	_, err := s.client.From("attendance_snapshots").
+	q := s.client.From("attendance_snapshots").
 		Select("*", "", false).
 		Eq("userid", userID).
-		Eq("coursecode", courseCode).
-		Order("fetchedat", &postgrest.OrderOpts{Ascending: false}).
+		Eq("coursecode", courseCode)
+	if strings.TrimSpace(slot) != "" {
+		q = q.Eq("slot", strings.TrimSpace(slot))
+	}
+	_, err := q.Order("fetchedat", &postgrest.OrderOpts{Ascending: false}).
 		Limit(limit, "").
 		ExecuteTo(&rows)
 	if err != nil {
 		logger.Error("get_attendance_snapshots", "Failed to fetch attendance snapshots", err, map[string]interface{}{
 			"user_id": userID,
 			"course":  courseCode,
+			"slot":    slot,
 			"limit":   limit,
 		})
 		return nil, err
 	}
+
+	logger.Info("get_attendance_snapshots", "Fetched snapshot rows", map[string]interface{}{
+		"user_id":    userID,
+		"course":     courseCode,
+		"slot":       slot,
+		"raw_rows":   len(rows),
+		"limit":      limit,
+	})
 
 	snapshots := make([]models.AttendanceSnapshot, 0, len(rows))
 	for _, row := range rows {
@@ -146,9 +167,10 @@ func (s *SupabaseClient) InsertAttendanceDelta(delta models.AttendanceDelta) err
 		"computedat":          delta.ComputedAt.Format(time.RFC3339),
 	}
 
+	var insResult []map[string]interface{}
 	_, err := s.client.From("attendance_deltas").
 		Insert(row, false, "", "", "").
-		ExecuteTo(&map[string]interface{}{})
+		ExecuteTo(&insResult)
 	if err != nil {
 		logger.Error("insert_attendance_delta", "Failed to insert attendance delta", err, map[string]interface{}{
 			"user_id": userIDShortcut(delta.UserID),
@@ -156,6 +178,11 @@ func (s *SupabaseClient) InsertAttendanceDelta(delta models.AttendanceDelta) err
 		})
 		return err
 	}
+	logger.Info("insert_attendance_delta", "Delta row accepted by API", map[string]interface{}{
+		"user_id":    delta.UserID,
+		"course":     delta.CourseCode,
+		"delta_type": delta.DeltaType,
+	})
 
 	return nil
 }
@@ -209,9 +236,10 @@ func (s *SupabaseClient) InsertTentativeAttendanceEvent(event models.TentativeAt
 		"expiresat":            event.ExpiresAt.Format(time.RFC3339),
 	}
 
+	var insResult []map[string]interface{}
 	_, err := s.client.From("tentative_attendance_events").
 		Insert(row, false, "", "", "").
-		ExecuteTo(&map[string]interface{}{})
+		ExecuteTo(&insResult)
 	if err != nil {
 		logger.Error("insert_tentative_event", "Failed to insert tentative attendance event", err, map[string]interface{}{
 			"user_id": event.UserID,
@@ -219,6 +247,10 @@ func (s *SupabaseClient) InsertTentativeAttendanceEvent(event models.TentativeAt
 		})
 		return err
 	}
+	logger.Info("insert_tentative_event", "Tentative row accepted by API", map[string]interface{}{
+		"user_id": event.UserID,
+		"course":  event.CourseCode,
+	})
 
 	return nil
 }
@@ -229,12 +261,13 @@ func (s *SupabaseClient) UpdateTentativeStatus(id, status string) error {
 		return fmt.Errorf("tentative id required")
 	}
 
+	var updResult []map[string]interface{}
 	_, err := s.client.From("tentative_attendance_events").
 		Update(map[string]interface{}{
 			"status": status,
 		}, "", "").
 		Eq("id", id).
-		ExecuteTo(&map[string]interface{}{})
+		ExecuteTo(&updResult)
 	if err != nil {
 		logger.Error("update_tentative_status", "Failed to update tentative status", err, map[string]interface{}{
 			"tentative_id": id,
@@ -397,9 +430,10 @@ func (s *SupabaseClient) InsertFinalAttendanceEvent(event models.FinalAttendance
 		"finalizedat":  event.FinalizedAt.Format(time.RFC3339),
 	}
 
+	var insResult []map[string]interface{}
 	_, err := s.client.From("final_attendance_events").
 		Insert(row, false, "", "", "").
-		ExecuteTo(&map[string]interface{}{})
+		ExecuteTo(&insResult)
 	if err != nil {
 		logger.Error("insert_final_attendance_event", "Failed to insert final record", err, map[string]interface{}{
 			"user_id": event.UserID,
@@ -407,6 +441,10 @@ func (s *SupabaseClient) InsertFinalAttendanceEvent(event models.FinalAttendance
 		})
 		return err
 	}
+	logger.Info("insert_final_attendance_event", "Final attendance row accepted by API", map[string]interface{}{
+		"user_id": event.UserID,
+		"course":  event.CourseCode,
+	})
 
 	return nil
 }

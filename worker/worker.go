@@ -252,9 +252,20 @@ func (w *Worker) executeLoginWithCredentials(userID, email, password string) (bo
 		return false, &failureMsg
 	}
 
+	logger.Info("execute_login_with_credentials", "password_persist: calling SaveUserEncryptedPassword after token upsert", map[string]interface{}{
+		"user_id":                 userID,
+		"email":                   email,
+		"password_from_job":       password != "",
+	})
 	if saveErr := w.db.SaveUserEncryptedPassword(userID, email, password); saveErr != nil {
-		logger.Error("execute_login_with_credentials", "Failed to store encrypted password", saveErr, map[string]interface{}{
+		logger.Error("execute_login_with_credentials", "password_persist: SaveUserEncryptedPassword returned error", saveErr, map[string]interface{}{
 			"user_id": userID,
+			"email":   email,
+		})
+	} else {
+		logger.Info("execute_login_with_credentials", "password_persist: SaveUserEncryptedPassword succeeded", map[string]interface{}{
+			"user_id": userID,
+			"email":   email,
 		})
 	}
 

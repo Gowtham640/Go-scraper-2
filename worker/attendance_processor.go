@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"srm-academia-scraper/logger"
@@ -11,7 +12,7 @@ import (
 
 const (
 	tentativeWindowPaddingDays = 4
-	tentativeExpirationHours   = 36
+	tentativeExpirationHours   = 24
 )
 
 type attendanceProcessor struct {
@@ -31,7 +32,18 @@ func (p *attendanceProcessor) Process(jobID, userID string, entries []models.Att
 		return nil
 	}
 
+	logger.Info("attendance_processor", "Pipeline start", map[string]interface{}{
+		"job_id":     jobID,
+		"user_id":    userID,
+		"entry_count": len(entries),
+		"fetched_at": fetchedAt.Format(time.RFC3339),
+	})
+
 	if err := p.ingestSnapshots(userID, entries, fetchedAt); err != nil {
+		logger.Error("attendance_processor", "ingestSnapshots failed; deltas/tentatives skipped", err, map[string]interface{}{
+			"job_id":  jobID,
+			"user_id": userID,
+		})
 		return err
 	}
 
@@ -64,7 +76,13 @@ func (p *attendanceProcessor) Process(jobID, userID string, entries []models.Att
 
 func (p *attendanceProcessor) ingestSnapshots(userID string, entries []models.AttendanceEntry, fetchedAt time.Time) error {
 	inserted := 0
-	for _, entry := range entries {
+	for i, entry := range entries {
+		logger.Info("attendance_ingestion", "Inserting snapshot row", map[string]interface{}{
+			"user_id": userID,
+			"course":  entry.CourseCode,
+			"slot":    entry.Slot,
+			"index":   i,
+		})
 		if err := p.db.InsertAttendanceSnapshot(userID, entry, fetchedAt); err != nil {
 			logger.Warn("attendance_ingestion", "Skipping snapshot due to insert error", map[string]interface{}{
 				"user_id": userID,
@@ -77,6 +95,10 @@ func (p *attendanceProcessor) ingestSnapshots(userID string, entries []models.At
 	}
 
 	if inserted == 0 {
+		logger.Error("attendance_ingestion", "No snapshots inserted for user", nil, map[string]interface{}{
+			"user_id":     userID,
+			"entry_total": len(entries),
+		})
 		return fmt.Errorf("no attendance snapshots inserted for user %s", userID)
 	}
 
@@ -90,11 +112,24 @@ func (p *attendanceProcessor) ingestSnapshots(userID string, entries []models.At
 func (p *attendanceProcessor) computeDeltas(jobID, userID string, entries []models.AttendanceEntry, fetchedAt time.Time) ([]models.AttendanceDelta, error) {
 	var deltas []models.AttendanceDelta
 	for _, entry := range entries {
-		snapshots, err := p.db.GetAttendanceSnapshots(userID, entry.CourseCode, 2)
+		snapshots, err := p.db.GetAttendanceSnapshots(userID, entry.CourseCode, entry.Slot, 2)
 		if err != nil {
+			logger.Error("attendance_delta", "GetAttendanceSnapshots failed", err, map[string]interface{}{
+				"job_id":  jobID,
+				"user_id": userID,
+				"course":  entry.CourseCode,
+				"slot":    entry.Slot,
+			})
 			return nil, err
 		}
 		if len(snapshots) < 2 {
+			logger.Info("attendance_delta", "Skip delta: need two prior snapshots for this course+slot", map[string]interface{}{
+				"job_id":         jobID,
+				"user_id":        userID,
+				"course":         entry.CourseCode,
+				"slot":           entry.Slot,
+				"snapshot_count": len(snapshots),
+			})
 			continue
 		}
 
@@ -108,13 +143,31 @@ func (p *attendanceProcessor) computeDeltas(jobID, userID string, entries []mode
 		}
 
 		deltaType := determineDeltaType(deltaHoursConducted, deltaHoursAbsent)
+		logger.Info("attendance_delta", "Compared latest two snapshots", map[string]interface{}{
+			"job_id":               jobID,
+			"user_id":              userID,
+			"course":               entry.CourseCode,
+			"slot":                 entry.Slot,
+			"prev_conducted":       prev.HoursConducted,
+			"prev_absent":          prev.HoursAbsent,
+			"curr_conducted":       curr.HoursConducted,
+			"curr_absent":          curr.HoursAbsent,
+			"delta_conducted":      deltaHoursConducted,
+			"delta_absent":         deltaHoursAbsent,
+			"delta_present_inferred": deltaHoursPresent,
+			"delta_type":           deltaType,
+		})
 		if deltaType == models.DeltaTypeNoChange {
+			logger.Info("attendance_delta", "No delta row: classified as NO_CHANGE", map[string]interface{}{
+				"job_id": jobID, "user_id": userID, "course": entry.CourseCode, "slot": entry.Slot,
+			})
 			continue
 		}
 
 		delta := models.AttendanceDelta{
 			UserID:              userID,
 			CourseCode:          entry.CourseCode,
+			Slot:                entry.Slot,
 			PrevHoursAbsent:     prev.HoursAbsent,
 			PrevHoursConducted:  prev.HoursConducted,
 			CurrHoursAbsent:     curr.HoursAbsent,
@@ -127,6 +180,9 @@ func (p *attendanceProcessor) computeDeltas(jobID, userID string, entries []mode
 		}
 
 		if err := p.db.InsertAttendanceDelta(delta); err != nil {
+			logger.Error("attendance_delta", "InsertAttendanceDelta failed", err, map[string]interface{}{
+				"job_id": jobID, "user_id": userID, "course": entry.CourseCode,
+			})
 			return nil, err
 		}
 
@@ -159,6 +215,9 @@ func determineDeltaType(deltaConducted, deltaAbsent int) string {
 
 func (p *attendanceProcessor) createTentatives(jobID string, deltas []models.AttendanceDelta, fetchedAt time.Time) error {
 	if len(deltas) == 0 {
+		logger.Info("tentative_creation", "No deltas to derive tentatives from", map[string]interface{}{
+			"job_id": jobID,
+		})
 		return nil
 	}
 
@@ -166,6 +225,9 @@ func (p *attendanceProcessor) createTentatives(jobID string, deltas []models.Att
 	created := 0
 	for _, delta := range deltas {
 		if delta.DeltaType != models.DeltaTypeAddition && delta.DeltaType != models.DeltaTypeMixed {
+			logger.Info("tentative_creation", "Skip tentative: delta type not ADDITION/MIXED", map[string]interface{}{
+				"job_id": jobID, "course": delta.CourseCode, "delta_type": delta.DeltaType,
+			})
 			continue
 		}
 
@@ -178,8 +240,35 @@ func (p *attendanceProcessor) createTentatives(jobID string, deltas []models.Att
 			inferredPresent = 0
 		}
 		if inferredAbsent == 0 && inferredPresent == 0 {
+			logger.Info("tentative_creation", "Skip tentative: zero inferred absent and present", map[string]interface{}{
+				"job_id": jobID, "course": delta.CourseCode,
+			})
 			continue
 		}
+
+		schedule, schedErr := p.db.GetCourseSchedule(delta.CourseCode)
+		if schedErr != nil {
+			logger.Warn("tentative_creation", "Could not load course_schedule for timetable match log", map[string]interface{}{
+				"job_id": jobID, "course": delta.CourseCode, "error": schedErr.Error(),
+			})
+		}
+		todayH, yestH := expectedSlotHoursOnDays(schedule, delta.Slot, fetchedAt)
+		matchToday := todayH > 0 && int(math.Round(todayH)) == delta.DeltaHoursConducted
+		matchYest := yestH > 0 && int(math.Round(yestH)) == delta.DeltaHoursConducted
+		confidence := 0.0
+		if matchToday || matchYest {
+			confidence = 1.0
+		} else if todayH > 0 || yestH > 0 {
+			ref := math.Max(todayH, yestH)
+			if ref > 0 {
+				confidence = math.Max(0, 1.0-math.Abs(float64(delta.DeltaHoursConducted)-ref)/ref)
+			}
+		}
+		logger.Info("tentative_creation", "Timetable vs delta_conducted (log-only confidence)", map[string]interface{}{
+			"job_id": jobID, "course": delta.CourseCode, "slot": delta.Slot,
+			"delta_conducted": delta.DeltaHoursConducted, "expected_hours_today": todayH, "expected_hours_yesterday": yestH,
+			"match_today": matchToday, "match_yesterday": matchYest, "confidence_estimate": confidence,
+		})
 
 		tentative := models.TentativeAttendanceEvent{
 			UserID:               delta.UserID,
@@ -312,6 +401,9 @@ func (p *attendanceProcessor) finalizeTentatives(jobID string, now time.Time) er
 	if err != nil {
 		return err
 	}
+	logger.Info("finalize_tentative", "Scanning tentatives past expiresAt for promotion to final", map[string]interface{}{
+		"job_id": jobID, "candidate_count": len(tentatives), "now": now.Format(time.RFC3339),
+	})
 
 	for _, tentative := range tentatives {
 		if tentative.InferredHoursAbsent == 0 && tentative.InferredHoursPresent == 0 {
@@ -340,7 +432,7 @@ func (p *attendanceProcessor) finalizeTentatives(jobID string, now time.Time) er
 }
 
 func (p *attendanceProcessor) confirmTentative(jobID string, tentative models.TentativeAttendanceEvent, now time.Time) error {
-	snapshots, err := p.db.GetAttendanceSnapshots(tentative.UserID, tentative.CourseCode, 1)
+	snapshots, err := p.db.GetAttendanceSnapshots(tentative.UserID, tentative.CourseCode, "", 1)
 	if err != nil {
 		return err
 	}
@@ -451,4 +543,45 @@ func goWeekdayToInt(day time.Weekday) int {
 		return 7
 	}
 	return int(day)
+}
+
+// expectedSlotHoursOnDays sums scheduled duration (hours) for the slot on ref day and previous day.
+func expectedSlotHoursOnDays(schedule []models.CourseScheduleEntry, slot string, ref time.Time) (today float64, yesterday float64) {
+	day := truncateToDate(ref)
+	prev := day.AddDate(0, 0, -1)
+	wToday := goWeekdayToInt(day.Weekday())
+	wPrev := goWeekdayToInt(prev.Weekday())
+	for _, e := range schedule {
+		if slot != "" && e.Slot != slot {
+			continue
+		}
+		h := durationHoursFromScheduleTimes(e.StartTime, e.EndTime)
+		if e.Weekday == wToday {
+			today += h
+		}
+		if e.Weekday == wPrev {
+			yesterday += h
+		}
+	}
+	return today, yesterday
+}
+
+func durationHoursFromScheduleTimes(start, end string) float64 {
+	if start == "" || end == "" {
+		return 0
+	}
+	t0, err0 := time.Parse("15:04:05", start)
+	t1, err1 := time.Parse("15:04:05", end)
+	if err0 != nil || err1 != nil {
+		t0, err0 = time.Parse("15:04", start)
+		t1, err1 = time.Parse("15:04", end)
+	}
+	if err0 != nil || err1 != nil {
+		return 0
+	}
+	sec := t1.Sub(t0).Seconds()
+	if sec <= 0 {
+		return 0
+	}
+	return sec / 3600.0
 }

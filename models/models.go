@@ -279,6 +279,7 @@ type AttendanceDelta struct {
 	ID                  string    `json:"id"`
 	UserID              string    `json:"userId"`
 	CourseCode          string    `json:"courseCode"`
+	Slot                string    `json:"slot,omitempty"` // set in worker for logs / timetable match; not stored in attendance_deltas unless column exists
 	PrevHoursAbsent     int       `json:"prevHoursAbsent"`
 	PrevHoursConducted  int       `json:"prevHoursConducted"`
 	CurrHoursAbsent     int       `json:"currHoursAbsent"`

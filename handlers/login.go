@@ -31,7 +31,7 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			email = req.Email
 		}
 		if email == "" || req.Password == "" {
-			logger.Error("login_handler", "Missing credentials in request", nil, map[string]interface{}{
+			logger.Error("login_handler", "Missing credentials in request (password or email empty)", nil, map[string]interface{}{
 				"email_provided":    email != "",
 				"password_provided": req.Password != "",
 			})
@@ -80,7 +80,7 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			return
 		}
 
-		logger.InfoWithUser(email, "login_handler", "Login successful", map[string]interface{}{
+		logger.InfoWithUser(email, "login_handler", "Login successful (encrypted password upsert attempted inside session)", map[string]interface{}{
 			"user_id": userID,
 		})
 

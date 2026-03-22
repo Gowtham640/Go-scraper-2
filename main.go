@@ -173,29 +173,9 @@ func main() {
 		serverErrCh <- server.ListenAndServe()
 	}()
 
-	// Run heavy initialization after listener is live
+	// Swap in real routes after listener is live (use same db/jobManager as worker/scheduler).
 	go func() {
-		// Initialize Supabase client
-		db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey)
-		if err != nil {
-			logger.Fatal("supabase_init", "Failed to initialize Supabase client", err)
-		}
-
-		logger.Info("supabase_init", "Supabase client initialized", nil)
-
-		// Start background worker
-		jobWorker := worker.NewWorker(db)
-		jobWorker.Start()
-		logger.Info("worker_init", "Background worker started", nil)
-
-		// Create job manager
-		jobManager := jobs.NewManager(db, jobWorker)
-		logger.Info("job_manager_init", "Job manager initialized", nil)
-
-		// Create router
 		mux := http.NewServeMux()
-
-		// Register routes
 		mux.HandleFunc("/login", handlers.LoginHandler(db))
 		mux.HandleFunc("/user", handlers.UserHandler(jobManager))
 		mux.HandleFunc("/courses", handlers.CoursesHandler(jobManager))
@@ -204,7 +184,6 @@ func main() {
 		mux.HandleFunc("/attendance", handlers.AttendanceHandler(jobManager))
 		mux.HandleFunc("/marks", handlers.MarksHandler(jobManager))
 		mux.HandleFunc("/health", handlers.HealthHandler())
-
 		setHandler(mux)
 		logger.Info("server_ready", "HTTP handler is ready", nil)
 	}()
