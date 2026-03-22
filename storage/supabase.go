@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
+	"srm-academia-scraper/passcrypt"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,12 +16,13 @@ import (
 )
 
 type SupabaseClient struct {
-	client *supabase.Client
+	client      *supabase.Client
+	passwordKey []byte
 }
 
 var ErrQueueFull = errors.New("queue_full")
 
-func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
+func NewSupabaseClient(url, key string, passwordKey []byte) (*SupabaseClient, error) {
 	logger.Info("supabase_init", "Initializing Supabase client", nil)
 
 	client, err := supabase.NewClient(url, key, nil)
@@ -30,7 +32,7 @@ func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
 	}
 
 	logger.Info("supabase_init", "Supabase client initialized successfully", nil)
-	return &SupabaseClient{client: client}, nil
+	return &SupabaseClient{client: client, passwordKey: passwordKey}, nil
 }
 
 // CreateAuthUser creates a user in auth.users table
@@ -85,6 +87,63 @@ func (s *SupabaseClient) UpsertUser(userID, email string, userInfo *models.UserI
 
 	logger.InfoWithUser(email, "upsert_user", "User data upserted successfully", nil)
 	return nil
+}
+
+// SaveUserEncryptedPassword encrypts plaintext with AES-GCM and upserts public.users (encrypted_password, password_iv, password_tag).
+func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext string) error {
+	if userID == "" {
+		return fmt.Errorf("user id required")
+	}
+	if email == "" {
+		return fmt.Errorf("email required")
+	}
+	if plaintext == "" {
+		return fmt.Errorf("empty password")
+	}
+	if len(s.passwordKey) == 0 {
+		return fmt.Errorf("password key not configured")
+	}
+
+	encB64, ivB64, tagB64, err := passcrypt.EncryptAESGCM(plaintext, s.passwordKey)
+	if err != nil {
+		logger.Error("save_user_encrypted_password", "Encrypt failed", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return err
+	}
+
+	// Upsert so a row exists even before profile fields are filled by FetchUserInfo.
+	data := map[string]interface{}{
+		"id":                 userID,
+		"email":              email,
+		"role":               "public",
+		"encrypted_password": encB64,
+		"password_iv":        ivB64,
+		"password_tag":       tagB64,
+	}
+
+	var result []map[string]interface{}
+	_, err = s.client.From("users").Upsert(data, "", "", "").ExecuteTo(&result)
+
+	if err != nil {
+		logger.Error("save_user_encrypted_password", "Failed to upsert users row", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return err
+	}
+
+	logger.Info("save_user_encrypted_password", "Stored encrypted password fields", map[string]interface{}{
+		"user_id": userID,
+	})
+	return nil
+}
+
+// DecryptStoredPassword decrypts public.users password fields using the same PASSWORD_KEY as SaveUserEncryptedPassword.
+func (s *SupabaseClient) DecryptStoredPassword(encryptedPasswordB64, passwordIVB64, passwordTagB64 string) (string, error) {
+	if len(s.passwordKey) == 0 {
+		return "", fmt.Errorf("password key not configured")
+	}
+	return passcrypt.DecryptAESGCM(encryptedPasswordB64, passwordIVB64, passwordTagB64, s.passwordKey)
 }
 
 // UpsertToken stores or updates session tokens in public.tokens table

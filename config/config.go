@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 
+	"srm-academia-scraper/passcrypt"
+
 	"github.com/joho/godotenv"
 )
 
@@ -13,6 +15,7 @@ type Config struct {
 	SupabaseURL     string
 	SupabaseKey     string
 	EncryptionKey   string
+	PasswordKey     []byte
 	Port            string
 	URL             string
 	CronSecret      string
@@ -27,10 +30,16 @@ func LoadConfig() (*Config, error) {
 		log.Println("Warning: .env file not found, using environment variables")
 	}
 
+	passwordKey, err := passcrypt.DecodePasswordKey(getEnv("PASSWORD_KEY", ""))
+	if err != nil {
+		return nil, fmt.Errorf("PASSWORD_KEY: %w", err)
+	}
+
 	config := &Config{
 		SupabaseURL:   getEnv("SUPABASE_URL", ""),
 		SupabaseKey:   getEnv("SUPABASE_KEY", ""),
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
+		PasswordKey:   passwordKey,
 		Port:          getEnv("PORT", "8080"),
 		URL:           getEnv("URL", "http://localhost:3000"),
 		CronSecret:    getEnv("CRON_SECRET", ""),

@@ -252,6 +252,12 @@ func (w *Worker) executeLoginWithCredentials(userID, email, password string) (bo
 		return false, &failureMsg
 	}
 
+	if saveErr := w.db.SaveUserEncryptedPassword(userID, email, password); saveErr != nil {
+		logger.Error("execute_login_with_credentials", "Failed to store encrypted password", saveErr, map[string]interface{}{
+			"user_id": userID,
+		})
+	}
+
 	logger.Info("execute_login_with_credentials", "Login completed successfully", map[string]interface{}{
 		"user_id":     userID,
 		"expiry_days": expiryDays,

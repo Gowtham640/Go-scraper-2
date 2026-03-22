@@ -83,7 +83,7 @@ func main() {
 	})
 
 	// Initialize Supabase client
-	db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey)
+	db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey, cfg.PasswordKey)
 	if err != nil {
 		logger.Fatal("supabase_init", "Failed to initialize Supabase client", err)
 	}

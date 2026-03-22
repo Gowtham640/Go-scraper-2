@@ -183,6 +183,13 @@ func (s *SessionManager) LoginAndCreateUser(email, password string) (string, err
 		return "", err
 	}
 
+	// Persist AES-GCM encrypted portal password on public.users (frontend sends it on /login).
+	if saveErr := s.storage.SaveUserEncryptedPassword(userID, email, password); saveErr != nil {
+		logger.ErrorWithUser(email, "session_create_user", "Failed to store encrypted password", saveErr, map[string]interface{}{
+			"user_id": userID,
+		})
+	}
+
 	logger.InfoWithUser(email, "session_create_user", "User created and logged in successfully", map[string]interface{}{
 		"user_id": userID,
 	})
