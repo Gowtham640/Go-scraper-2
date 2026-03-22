@@ -1,4 +1,4 @@
-﻿const { chromium } = require('playwright');
+const { chromium } = require('playwright');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -31,23 +31,15 @@ const proxiedConsole = new Proxy(baseConsole, {
 });
 globalThis.console = proxiedConsole;
 
-const PORT = parseInt(process.env.AUTH_SERVICE_PORT || '3001', 10);
+const PORT = process.env.AUTH_SERVICE_PORT || 3001;
 const CONTEXT_COUNT = 3;
 const pool = [];
 let browser;
 
 async function bootstrap() {
   browser = await chromium.launch({
-    headless: false,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu'
-    ]
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
 
   for (let i = 0; i < CONTEXT_COUNT; i++) {
@@ -183,7 +175,17 @@ async function loginWithContext(entry, email, password) {
       console.error('🔄 STEP 11: Waiting for password field to appear...');
       console.error('🔑 Password input selector: #password (inside iframe)');
       const step11Start = Date.now();
-      await signinFrame.locator('#password').waitFor();
+      try {
+        await signinFrame.locator('#password').waitFor();
+      } catch (waitErr) {
+        console.error('⚠️ Password field wait timed out, invoking stabilizer...');
+        const stabilized = await stabilizePasswordField(page, signinFrame);
+        if (!stabilized) {
+          console.error('❌ Stabilizer could not recover password visibility');
+          throw waitErr;
+        }
+        await signinFrame.locator('#password').waitFor({ timeout: 10000 });
+      }
       console.error('✅ Password field appeared');
       console.error(`⏱️  Step 11 duration: ${Date.now() - step11Start}ms`);
       console.error('');
@@ -441,7 +443,9 @@ async function loginWithContext(entry, email, password) {
           console.error(`⏱️  Session reminder skip duration: ${Date.now() - sessionLimitStart}ms`);
           const afterSessionLimitUrl = page.url();
           console.error(`✅ Redirected to: ${afterSessionLimitUrl}`);
-          if (!afterSessionLimitUrl.includes('/portal/academia-academic-services') && !afterSessionLimitUrl.includes('#WELCOME')) {
+          if (!afterSessionLimitUrl.includes('/portal/academia-academic-services') &&
+            !afterSessionLimitUrl.includes('#WELCOME') &&
+            !isRootDomain(afterSessionLimitUrl)) {
             throw new Error('SESSION_REMINDER_SKIP_FAILED');
           }
 
@@ -449,12 +453,13 @@ async function loginWithContext(entry, email, password) {
           console.error('❌ LOGIN FAILED: Not on expected success page');
           throw new Error('LOGIN_FAILED');
         } else {
-          console.error('🎉 LOGIN SUCCESS: Already on portal page');
-        }
-      }
+      console.error('🎉 LOGIN SUCCESS: Already on portal page');
+    }
+  }
 
-      console.error('');
-      const currentUrl = await ensureDashboardUrl(page);
+  console.error('');
+  await stabilizeNavigation(page);
+  const currentUrl = await ensureDashboardUrl(page);
       const currentHash = await page.evaluate(() => window.location.hash).catch(() => '');
       console.error(`🔍 Current location hash before cookie extraction: ${currentHash}`);
       if (!isDashboardUrl(currentUrl)) {
@@ -464,8 +469,10 @@ async function loginWithContext(entry, email, password) {
 
       console.error('🔄 STEP 15: Extracting session cookies...');
       const cookieExtractStart = Date.now();
-      const cookies = await context.cookies();
+      let cookies = await context.cookies();
       console.error(`🍪 Found ${cookies.length} cookies from browser context`);
+      cookies = await retryCookieExtraction(context,page, cookies);
+      console.error(`🍪 Final cookie count after retry validation: ${cookies.length}`);
       let pageCookies = [];
       try {
         pageCookies = await page.context().cookies();
@@ -515,7 +522,9 @@ function isDashboardUrl(url) {
   if (!url) {
     return false;
   }
-  return url.includes('/portal/academia-academic-services') || url.includes('#WELCOME');
+  return url.includes('/portal/academia-academic-services') ||
+    url.includes('#WELCOME') ||
+    isRootDomain(url);
 }
 
 async function ensureDashboardUrl(page) {
@@ -614,6 +623,195 @@ async function handleSigninBlock(page, timeoutMs = 20000) {
   }
 }
 
+async function stabilizeNavigation(page, maxCycles = 5, waitMs = 1000) {
+  console.error('🛡️ Navigation stabilizer triggered');
+  for (let attempt = 1; attempt <= maxCycles; attempt++) {
+    const state = await detectState(page);
+    console.error(`🧭 Stabilizer detected state: ${state.state} (${state.reason})`);
+    if (state.state === 'portal') {
+      const cookies = await page.context().cookies();
+    
+      if (hasCriticalCookies(cookies)) {
+        return state;
+      }
+    
+      console.error('⚠️ Portal reached but cookies not ready, waiting...');
+      await page.waitForTimeout(2000);
+      continue;
+    }
+
+    if (state.state === 'unknown') {
+      console.error('⚠️ Unknown state, waiting for stabilization...');
+      await Promise.race([
+        page.waitForLoadState('networkidle'),
+        page.waitForTimeout(1500)
+      ]);
+      continue;
+    }
+    if (state.state === 'signin-block') {
+      console.error('🧭 Stabilizer: Re-running signin block handler');
+      await handleSigninBlock(page, 10000);
+    } else if (state.state === 'session-limit' || state.state === 'session-reminder') {
+      console.error('🧭 Stabilizer: Re-running preannouncement handler');
+      await handlePreannouncement(page);
+    } else {
+      console.error('🧘 Stabilizer: No action mapped for this state');
+      return state;
+    }
+    await page.waitForTimeout(waitMs);
+  }
+  const fallbackState = await detectState(page);
+  console.error(`🧭 Stabilizer final state after retries: ${fallbackState.state}`);
+  return fallbackState;
+}
+
+async function detectState(page) {
+  const url = page.url();
+  let continueVisible = false;
+  let remindVisible = false;
+  let terminateVisible = false;
+  try {
+    const [
+      continueCount,
+      remindCount,
+      terminateCount
+    ] = await Promise.all([
+      page.locator('a#continue_button, a.blue_btn.continue_button#continue_button, #continue_button').count(),
+      page.locator('a.remind_me_later').count(),
+      page.getByText('Terminate All Sessions').count()
+    ]);
+    continueVisible = continueCount > 0;
+    remindVisible = remindCount > 0;
+    terminateVisible = terminateCount > 0;
+  } catch (err) {
+    console.error('⚠️ detectState DOM scan failed:', err.message);
+  }
+
+  if ((continueVisible && url.includes('/announcement/signin-block')) || url.includes('/announcement/signin-block')) {
+    return { state: 'signin-block', reason: 'signin block matched', url };
+  }
+  if (remindVisible || url.includes('/announcement/sessions-reminder')) {
+    return { state: 'session-reminder', reason: 'session reminder matched', url };
+  }
+  if (terminateVisible || url.includes('/preannouncement/block-sessions') || url.includes('/block-sessions')) {
+    return { state: 'session-limit', reason: 'session limit matched', url };
+  }
+  if (url.includes('/portal/academia-academic-services') || url.includes('#WELCOME') || isRootDomain(url)) {
+    return { state: 'portal', reason: 'dashboard URL matched', url };
+  }
+
+  return { state: 'unknown', reason: 'no known state detected', url };
+}
+
+async function describePasswordVisibility(locator) {
+  try {
+    return await locator.evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      const isVisible = style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        parseFloat(style.opacity || '1') > 0 &&
+        rect.width > 1 &&
+        rect.height > 1 &&
+        el.offsetParent !== null;
+      return {
+        isVisible,
+        width: rect.width,
+        height: rect.height,
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        offsetParent: el.offsetParent !== null
+      };
+    });
+  } catch (err) {
+    console.error('⚠️ describePasswordVisibility failed:', err.message);
+    return {
+      isVisible: false,
+      width: 0,
+      height: 0,
+      display: 'unknown',
+      visibility: 'unknown',
+      opacity: '0',
+      offsetParent: false
+    };
+  }
+}
+
+async function stabilizePasswordField(page, frameLocator, attempts = 3, waitMs = 1500) {
+  console.error('🛠 Password stabilizer invoked');
+  const locator = frameLocator.locator('#password');
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const state = await describePasswordVisibility(locator);
+    console.error(`🧭 Stabilizer attempt ${attempt}: visible=${state.isVisible} width=${state.width} height=${state.height} display=${state.display}`);
+    if (state.isVisible) {
+      console.error('🧘 Password already visible, stabilizer complete');
+      return true;
+    }
+    try {
+      await locator.evaluate(el => {
+        const container = document.getElementById('password_container') || el.closest('.getpassword');
+        if (container) {
+          container.style.display = 'block';
+          container.style.visibility = 'visible';
+          container.style.opacity = '1';
+          container.style.height = 'auto';
+          container.style.minHeight = '44px';
+        }
+        if (el.parentElement) {
+          el.parentElement.style.display = 'block';
+          el.parentElement.style.opacity = '1';
+        }
+        el.style.display = 'block';
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+        el.style.width = '100%';
+        el.style.height = '40px';
+        el.style.transform = 'none';
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+      });
+    } catch (evalErr) {
+      console.error('⚠️ Password stabilizer adjustment failed:', evalErr.message);
+    }
+    await page.waitForTimeout(waitMs);
+  }
+  const finalState = await describePasswordVisibility(locator);
+  console.error(`🧭 Stabilizer final state: visible=${finalState.isVisible} width=${finalState.width} height=${finalState.height}`);
+  return finalState.isVisible;
+}
+
+function hasCriticalCookies(cookies) {
+  const cookieNames = cookies.map(cookie => cookie.name);
+  const hasIamcsr = cookieNames.includes('iamcsr');
+  const hasWmsToken = cookieNames.some(name => /^wms-tkp-token_/i.test(name));
+  return hasIamcsr && hasWmsToken;
+}
+
+async function retryCookieExtraction(context, page,initialCookies, maxRetries = 3) {
+  let cookies = initialCookies;
+  if (hasCriticalCookies(cookies)) {
+    return cookies;
+  }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    console.error(`⚠️ Critical cookies missing, retry attempt ${attempt}/${maxRetries}`);
+    await page.waitForLoadState('domcontentloaded');
+    await delay(2000);
+    cookies = await context.cookies();
+    if (hasCriticalCookies(cookies)) {
+      console.error('✅ Critical cookies recovered via retry');
+      return cookies;
+    }
+  }
+
+  console.error('❌ Critical cookies still missing after retries');
+  return cookies;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function resetPageForNextJob(page) {
   try {
     await page.evaluate(() => {
@@ -681,7 +879,7 @@ async function startServer() {
     res.end();
   });
   server.listen(PORT, '127.0.0.1', () => {
-    console.log(`Auth browser service listening on http://127.0.0.1:${PORT}`);
+    console.log(`Auth browser service listening on http://0.0.0.0:${PORT}`);
   });
 }
 

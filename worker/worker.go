@@ -282,6 +282,7 @@ func (w *Worker) executeFetchJob(job *models.Job) (bool, *string) {
 			"job_id":  job.ID,
 			"user_id": job.UserID,
 		})
+		w.enqueueLoginJobForUser(job.UserID, job.DataType)
 		return false, &failureMsg
 	}
 
@@ -961,6 +962,53 @@ func (w *Worker) fetchUserInfo(job *models.Job, tokenData *models.TokenData) (bo
 	})
 
 	return true, nil
+}
+
+func (w *Worker) enqueueLoginJobForUser(userID, dataType string) {
+	logger.Info("execute_fetch_job", "Enqueuing login job because token missing", map[string]interface{}{
+		"user_id":   userID,
+		"data_type": dataType,
+	})
+
+	email, err := w.db.GetUserEmail(userID)
+	if err != nil {
+		logger.Warn("execute_fetch_job", fmt.Sprintf("Could not determine user email for login fallback: %v", err), map[string]interface{}{
+			"user_id": userID,
+		})
+		email = ""
+	}
+
+	jobReq := models.JobCreateRequest{
+		UserID:             userID,
+		JobType:            "login",
+		DataType:           "auth",
+		Priority:           100,
+		Email:              email,
+		RequestedDataTypes: []string{dataType},
+	}
+
+	_, loginReq, enqueueErr := w.db.EnqueueJob(jobReq)
+	if enqueueErr != nil {
+		logger.Error("execute_fetch_job", "Failed to enqueue fallback login job", enqueueErr, map[string]interface{}{
+			"user_id":   userID,
+			"data_type": dataType,
+		})
+		return
+	}
+
+	if loginReq == nil {
+		logger.Info("execute_fetch_job", "Login job already exists or queue limit reached", map[string]interface{}{
+			"user_id":   userID,
+			"data_type": dataType,
+		})
+		return
+	}
+
+	w.EnqueueLoginRequest(*loginReq)
+	logger.Info("execute_fetch_job", "Fallback login request sent to login worker", map[string]interface{}{
+		"user_id":   userID,
+		"data_type": dataType,
+	})
 }
 
 // isAuthFailure checks if an error indicates authentication failure

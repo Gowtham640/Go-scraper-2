@@ -26,6 +26,12 @@ vendor/
 # Go workspace file
 go.work
 
+attendance.html
+calendar.html
+courses.html
+timetable.html
+user.html
+calendar_raw.html
 # Environment variables
 .env
 .env.local
@@ -49,5 +55,5 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
-
+node_modules/
 *.html
