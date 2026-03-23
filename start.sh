@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+export $(grep -v '^#' .env | xargs)
+echo "PASSWORD_KEY=$PASSWORD_KEY"
 AUTH_SERVICE_PORT=${AUTH_SERVICE_PORT:-3001}
 AUTH_WAIT_TIMEOUT=${AUTH_WAIT_TIMEOUT:-30}
 PORT=${PORT:-8080}

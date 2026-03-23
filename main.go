@@ -11,6 +11,7 @@ import (
 	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/middleware"
+	"srm-academia-scraper/scheduler"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
 	"sync"
@@ -87,6 +88,38 @@ func main() {
 		"port": cfg.Port,
 	})
 
+	// Initialize Supabase client
+	db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey, cfg.PasswordKey)
+	if err != nil {
+		logger.Fatal("supabase_init", "Failed to initialize Supabase client", err)
+	}
+
+	logger.Info("supabase_init", "Supabase client initialized", nil)
+
+	// Start background worker
+	jobWorker := worker.NewWorker(db)
+	jobWorker.Start()
+	logger.Info("worker_init", "Background worker started", nil)
+
+	// Create job manager
+	jobManager := jobs.NewManager(db, jobWorker)
+	logger.Info("job_manager_init", "Job manager initialized", nil)
+	if os.Getenv("CRON_MODE") == "1" {
+		attendanceScheduler := scheduler.NewAttendanceScheduler(db, cfg.CronIntervalMinutes, cfg.CronBatchSize)
+		attendanceScheduler.Start()
+		logger.Info("attendance_scheduler_init", "Attendance scheduler started", nil)
+		calendarScheduler := scheduler.NewCalendarScheduler(db)
+		calendarScheduler.Start()
+		logger.Info("calendar_scheduler_init", "Calendar scheduler started", nil)
+	} else {
+		logger.Info("attendance_scheduler_init", "Attendance scheduler disabled by CRON_MODE", map[string]interface{}{
+			"cron_mode": os.Getenv("CRON_MODE"),
+		})
+		logger.Info("calendar_scheduler_init", "Calendar scheduler disabled by CRON_MODE", map[string]interface{}{
+			"cron_mode": os.Getenv("CRON_MODE"),
+		})
+	}
+
 	// Create rate limiter (1 request per second per IP)
 	rateLimiter := middleware.NewRateLimiter(rate.Limit(1), 3)
 	rateLimiter.CleanupOldLimiters(10 * time.Minute)
@@ -152,29 +185,9 @@ func main() {
 		serverErrCh <- server.ListenAndServe()
 	}()
 
-	// Run heavy initialization after listener is live
+	// Swap in real routes after listener is live (use same db/jobManager as worker/scheduler).
 	go func() {
-		// Initialize Supabase client
-		db, err := storage.NewSupabaseClient(cfg.SupabaseURL, cfg.EncryptionKey)
-		if err != nil {
-			logger.Fatal("supabase_init", "Failed to initialize Supabase client", err)
-		}
-
-		logger.Info("supabase_init", "Supabase client initialized", nil)
-
-		// Start background worker
-		jobWorker := worker.NewWorker(db)
-		jobWorker.Start()
-		logger.Info("worker_init", "Background worker started", nil)
-
-		// Create job manager
-		jobManager := jobs.NewManager(db, jobWorker)
-		logger.Info("job_manager_init", "Job manager initialized", nil)
-
-		// Create router
 		mux := http.NewServeMux()
-
-		// Register routes
 		mux.HandleFunc("/login", handlers.LoginHandler(db))
 		mux.HandleFunc("/user", handlers.UserHandler(jobManager))
 		mux.HandleFunc("/courses", handlers.CoursesHandler(jobManager))
@@ -183,7 +196,6 @@ func main() {
 		mux.HandleFunc("/attendance", handlers.AttendanceHandler(jobManager))
 		mux.HandleFunc("/marks", handlers.MarksHandler(jobManager))
 		mux.HandleFunc("/health", handlers.HealthHandler())
-
 		setHandler(mux)
 		logger.Info("server_ready", "HTTP handler is ready", nil)
 	}()

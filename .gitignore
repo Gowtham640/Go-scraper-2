@@ -55,7 +55,7 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
-
-# Node dependencies
 node_modules/
-auth-browser/node_modules/
+*.html
+server
+temp_script_debug.py
