@@ -104,9 +104,15 @@ func main() {
 	// Create job manager
 	jobManager := jobs.NewManager(db, jobWorker)
 	logger.Info("job_manager_init", "Job manager initialized", nil)
-	attendanceScheduler := scheduler.NewAttendanceScheduler(db, cfg.CronIntervalMinutes, cfg.CronBatchSize)
-	attendanceScheduler.Start()
-	logger.Info("attendance_scheduler_init", "Attendance scheduler started", nil)
+	if os.Getenv("CRON_MODE") == "1" {
+		attendanceScheduler := scheduler.NewAttendanceScheduler(db, cfg.CronIntervalMinutes, cfg.CronBatchSize)
+		attendanceScheduler.Start()
+		logger.Info("attendance_scheduler_init", "Attendance scheduler started", nil)
+	} else {
+		logger.Info("attendance_scheduler_init", "Attendance scheduler disabled by CRON_MODE", map[string]interface{}{
+			"cron_mode": os.Getenv("CRON_MODE"),
+		})
+	}
 
 	// Create rate limiter (1 request per second per IP)
 	rateLimiter := middleware.NewRateLimiter(rate.Limit(1), 3)

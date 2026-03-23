@@ -216,6 +216,7 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 			"tokens":           tokens,
 			"expiry_timestamp": expiryTimestamp.Format(time.RFC3339),
 			"email":            email,
+			"failure_count":    0,
 		}
 
 		logger.InfoWithUser(email, "upsert_token", "Updating existing token", map[string]interface{}{"token_id": existing[0]["id"]})
@@ -237,6 +238,85 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 
 	logger.InfoWithUser(email, "upsert_token", "Token upserted successfully", nil)
 	return nil
+}
+
+// IncrementTokenFailureCount increments failure_count for a token row and returns the updated value.
+func (s *SupabaseClient) IncrementTokenFailureCount(userID string, failureReason *string) (int, error) {
+	logger.Info("increment_token_failure_count", "Incrementing token failure_count", map[string]interface{}{
+		"user_id": userID,
+	})
+
+	var currentResult []map[string]interface{}
+	_, err := s.client.From("tokens").
+		Select("failure_count", "", false).
+		Eq("user_id", userID).
+		Limit(1, "").
+		ExecuteTo(&currentResult)
+	if err != nil {
+		logger.Error("increment_token_failure_count", "Failed to fetch current failure_count", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return 0, err
+	}
+	if len(currentResult) == 0 {
+		return 0, fmt.Errorf("token not found for user")
+	}
+
+	currentCountFloat, ok := currentResult[0]["failure_count"].(float64)
+	if !ok {
+		return 0, fmt.Errorf("invalid failure_count type")
+	}
+	nextCount := int(currentCountFloat) + 1
+
+	updateData := map[string]interface{}{
+		"failure_count": nextCount,
+	}
+	if failureReason != nil {
+		updateData["failure_reason"] = *failureReason
+	}
+
+	var updateResult []map[string]interface{}
+	_, err = s.client.From("tokens").
+		Update(updateData, "", "").
+		Eq("user_id", userID).
+		ExecuteTo(&updateResult)
+	if err != nil {
+		logger.Error("increment_token_failure_count", "Failed to update failure_count", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return 0, err
+	}
+
+	logger.Info("increment_token_failure_count", "Token failure_count incremented", map[string]interface{}{
+		"user_id":       userID,
+		"failure_count": nextCount,
+	})
+	return nextCount, nil
+}
+
+// GetUserDecryptedPassword returns the stored decrypted portal password for a user.
+func (s *SupabaseClient) GetUserDecryptedPassword(userID string) (string, error) {
+	var result []map[string]interface{}
+	_, err := s.client.From("users").
+		Select("encrypted_password,password_iv,password_tag", "", false).
+		Eq("id", userID).
+		Limit(1, "").
+		ExecuteTo(&result)
+	if err != nil {
+		return "", err
+	}
+	if len(result) == 0 {
+		return "", fmt.Errorf("user not found")
+	}
+
+	encryptedPassword, ok1 := result[0]["encrypted_password"].(string)
+	passwordIV, ok2 := result[0]["password_iv"].(string)
+	passwordTag, ok3 := result[0]["password_tag"].(string)
+	if !ok1 || !ok2 || !ok3 || encryptedPassword == "" || passwordIV == "" || passwordTag == "" {
+		return "", fmt.Errorf("stored encrypted password not available")
+	}
+
+	return s.DecryptStoredPassword(encryptedPassword, passwordIV, passwordTag)
 }
 
 // GetToken retrieves token by user ID

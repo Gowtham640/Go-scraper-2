@@ -165,6 +165,36 @@ func (w *Worker) processClaimedJob(job *models.Job) {
 				"retry_count":    job.RetryCount,
 				"failure_reason": failureReason,
 			})
+
+			// Count one failure per fully failed job attempt (not per retry step).
+			if shouldTrackTokenFailure(job) {
+				updatedFailureCount, countErr := w.db.IncrementTokenFailureCount(job.UserID, failureReason)
+				if countErr != nil {
+					logger.Error("worker_process", "Failed to increment token failure_count", countErr, map[string]interface{}{
+						"job_id":    job.ID,
+						"user_id":   job.UserID,
+						"data_type": job.DataType,
+					})
+				} else {
+					logger.Info("worker_process", "Token failure_count updated after permanent job failure", map[string]interface{}{
+						"job_id":        job.ID,
+						"user_id":       job.UserID,
+						"data_type":     job.DataType,
+						"failure_count": updatedFailureCount,
+					})
+
+					if updatedFailureCount >= 2 {
+						logger.Warn("worker_process", "Failure threshold reached, triggering auto relogin", map[string]interface{}{
+							"job_id":        job.ID,
+							"user_id":       job.UserID,
+							"data_type":     job.DataType,
+							"failure_count": updatedFailureCount,
+						})
+						w.enqueueLoginJobForUser(job.UserID, job.DataType)
+					}
+				}
+			}
+
 			newStatus = "failed"
 		}
 	}
@@ -674,21 +704,31 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 	rawHTML := string(htmlContent)
 	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
-		if isLikelyLoginPage(rawHTML) {
-			logger.Warn("fetch_attendance", "Detected login page instead of attendance data", map[string]interface{}{
-				"job_id":  job.ID,
-				"user_id": job.UserID,
-				"snippet": snippet(rawHTML),
+		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
+		isLoginLike, indicators := detectLoginLikePage(rawHTML)
+		if isLoginLike {
+			logger.Warn("fetch_attendance", "Detected login-like page instead of attendance data", map[string]interface{}{
+				"job_id":     job.ID,
+				"user_id":    job.UserID,
+				"final_url":  finalURL,
+				"indicators": indicators,
+				"snippet":    snippet(rawHTML),
 			})
 			w.enqueueAttendanceLogin(job.UserID)
 			failureMsg := "Login page detected while fetching attendance"
 			return false, &failureMsg
 		}
 
-		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v", err)
+		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v | page_url=%s", err, finalURL)
+		logger.Warn("fetch_attendance", "Final URL before failing attendance job", map[string]interface{}{
+			"job_id":    job.ID,
+			"user_id":   job.UserID,
+			"final_url": finalURL,
+		})
 		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
+			"job_id":   job.ID,
+			"user_id":  job.UserID,
+			"page_url": finalURL,
 		})
 		return false, &failureMsg
 	}
@@ -775,10 +815,86 @@ func (w *Worker) enqueueAttendanceLogin(userID string) {
 }
 
 func isLikelyLoginPage(body string) bool {
+	isLoginLike, _ := detectLoginLikePage(body)
+	return isLoginLike
+}
+
+func detectLoginLikePage(body string) (bool, []string) {
 	lowered := strings.ToLower(body)
-	return (strings.Contains(lowered, "login") && strings.Contains(lowered, "password")) ||
-		strings.Contains(lowered, "iamcsr") ||
-		strings.Contains(lowered, "auth") && strings.Contains(lowered, "token")
+	indicators := make([]string, 0, 8)
+
+	if strings.Contains(lowered, "login") {
+		indicators = append(indicators, "contains:login")
+	}
+	if strings.Contains(lowered, "signin") || strings.Contains(lowered, "sign in") {
+		indicators = append(indicators, "contains:signin")
+	}
+	if strings.Contains(lowered, "password") || strings.Contains(lowered, "type=\"password\"") {
+		indicators = append(indicators, "contains:password_field")
+	}
+	if strings.Contains(lowered, "email") || strings.Contains(lowered, "type=\"email\"") {
+		indicators = append(indicators, "contains:email_field")
+	}
+	if strings.Contains(lowered, "<iframe") {
+		indicators = append(indicators, "contains:iframe")
+	}
+	if strings.Contains(lowered, "accounts/p/") || strings.Contains(lowered, "iamcsr") || strings.Contains(lowered, "zoho") {
+		indicators = append(indicators, "contains:auth_provider_marker")
+	}
+	if strings.Contains(lowered, "ct_csrf_token") || strings.Contains(lowered, "_zcsr_tmp") {
+		indicators = append(indicators, "contains:auth_csrf_cookie_marker")
+	}
+	if strings.Contains(lowered, "window.location") || strings.Contains(lowered, "location.href") {
+		indicators = append(indicators, "contains:client_redirect_script")
+	}
+
+	strongSignal := (strings.Contains(lowered, "login") || strings.Contains(lowered, "signin")) &&
+		(strings.Contains(lowered, "password") || strings.Contains(lowered, "type=\"password\""))
+	if strongSignal {
+		return true, indicators
+	}
+
+	if len(indicators) >= 3 {
+		return true, indicators
+	}
+	return false, indicators
+}
+
+func extractLikelyFinalURL(body, fallbackURL string) string {
+	lowered := strings.ToLower(body)
+	markers := []string{"location.href=", "window.location=", "window.location.href=", "action="}
+
+	for _, marker := range markers {
+		idx := strings.Index(lowered, marker)
+		if idx == -1 {
+			continue
+		}
+
+		after := body[idx+len(marker):]
+		for _, quote := range []string{"\"", "'"} {
+			start := strings.Index(after, quote)
+			if start == -1 {
+				continue
+			}
+			rest := after[start+1:]
+			end := strings.Index(rest, quote)
+			if end == -1 {
+				continue
+			}
+
+			candidate := strings.TrimSpace(rest[:end])
+			if candidate == "" {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(candidate), "https://academia.srmist.edu.in") {
+				return candidate
+			}
+			if strings.HasPrefix(candidate, "/") {
+				return scraper.SRMBaseURL + candidate
+			}
+		}
+	}
+	return fallbackURL
 }
 
 func snippet(body string) string {
@@ -853,12 +969,34 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 		"url":          scraper.AttendanceURL,
 	})
 
-	decodedHTML, err := scraper.ExtractSanitizedHTML(string(htmlContent))
+	rawHTML := string(htmlContent)
+	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
-		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v", err)
+		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
+		isLoginLike, indicators := detectLoginLikePage(rawHTML)
+		if isLoginLike {
+			logger.Warn("fetch_marks", "Detected login-like page instead of marks data", map[string]interface{}{
+				"job_id":     job.ID,
+				"user_id":    job.UserID,
+				"final_url":  finalURL,
+				"indicators": indicators,
+				"snippet":    snippet(rawHTML),
+			})
+			w.enqueueAttendanceLogin(job.UserID)
+			failureMsg := fmt.Sprintf("Login page detected while fetching marks | page_url=%s", finalURL)
+			return false, &failureMsg
+		}
+
+		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v | page_url=%s", err, finalURL)
+		logger.Warn("fetch_marks", "Final URL before failing marks job", map[string]interface{}{
+			"job_id":    job.ID,
+			"user_id":   job.UserID,
+			"final_url": finalURL,
+		})
 		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
+			"job_id":   job.ID,
+			"user_id":  job.UserID,
+			"page_url": finalURL,
 		})
 		return false, &failureMsg
 	}
@@ -995,7 +1133,18 @@ func (w *Worker) enqueueLoginJobForUser(userID, dataType string) {
 		DataType:           "auth",
 		Priority:           100,
 		Email:              email,
+		Password:           "",
 		RequestedDataTypes: []string{dataType},
+	}
+
+	password, passwordErr := w.db.GetUserDecryptedPassword(userID)
+	if passwordErr != nil {
+		logger.Warn("execute_fetch_job", "Could not load stored password for auto relogin", map[string]interface{}{
+			"user_id": userID,
+			"error":   passwordErr.Error(),
+		})
+	} else {
+		jobReq.Password = password
 	}
 
 	_, loginReq, enqueueErr := w.db.EnqueueJob(jobReq)
@@ -1020,6 +1169,13 @@ func (w *Worker) enqueueLoginJobForUser(userID, dataType string) {
 		"user_id":   userID,
 		"data_type": dataType,
 	})
+}
+
+func shouldTrackTokenFailure(job *models.Job) bool {
+	if job == nil || job.JobType != "fetch" {
+		return false
+	}
+	return job.DataType == "attendance" || job.DataType == "marks" || job.DataType == "timetable"
 }
 
 // isAuthFailure checks if an error indicates authentication failure
