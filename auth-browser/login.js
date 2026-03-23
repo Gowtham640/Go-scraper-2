@@ -872,6 +872,11 @@ async function handleLogin(req, res) {
 async function startServer() {
   await bootstrap();
   const server = http.createServer((req, res) => {
+    // Lightweight probe for Go /health and start-stack.ps1 wait loops
+    if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      return res.end('ok');
+    }
     if (req.method === 'POST' && req.url === '/login') {
       return handleLogin(req, res);
     }

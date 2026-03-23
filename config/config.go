@@ -10,12 +10,13 @@ import (
 
 // Config holds all environment variables
 type Config struct {
-	SupabaseURL     string
-	SupabaseKey     string
-	EncryptionKey   string
-	Port            string
-	URL             string
-	CronSecret      string
+	SupabaseURL      string
+	SupabaseKey      string
+	EncryptionKey    string
+	Port             string
+	AuthServicePort  string // Playwright auth-browser (see auth-browser/login.js)
+	URL              string
+	CronSecret       string
 }
 
 var AppConfig *Config
@@ -28,12 +29,13 @@ func LoadConfig() (*Config, error) {
 	}
 
 	config := &Config{
-		SupabaseURL:   getEnv("SUPABASE_URL", ""),
-		SupabaseKey:   getEnv("SUPABASE_KEY", ""),
-		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
-		Port:          getEnv("PORT", "8080"),
-		URL:           getEnv("URL", "http://localhost:3000"),
-		CronSecret:    getEnv("CRON_SECRET", ""),
+		SupabaseURL:     getEnv("SUPABASE_URL", ""),
+		SupabaseKey:     getEnv("SUPABASE_KEY", ""),
+		EncryptionKey:   getEnv("ENCRYPTION_KEY", ""),
+		Port:            getEnv("PORT", "8080"),
+		AuthServicePort: getEnv("AUTH_SERVICE_PORT", "3001"),
+		URL:             getEnv("URL", "http://localhost:3000"),
+		CronSecret:      getEnv("CRON_SECRET", ""),
 	}
 
 	// Validate required fields

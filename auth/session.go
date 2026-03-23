@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"srm-academia-scraper/config"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/scraper"
@@ -14,8 +15,6 @@ import (
 	"strings"
 	"time"
 )
-
-const authBrowserPort = 3001
 
 // SessionManager manages session tokens and handles auto-relogin
 type SessionManager struct {
@@ -75,8 +74,12 @@ func (s *SessionManager) PerformBrowserLogin(userID, email, password string) (st
 		"timeout_seconds":     30,
 	})
 
-	// Use new HTTP service
-	loginURL := fmt.Sprintf("http://127.0.0.1:%d/login", authBrowserPort)
+	// HTTP service started by auth-browser/login.js (run start-stack.ps1 or start.sh)
+	authPort := "3001"
+	if config.AppConfig != nil && config.AppConfig.AuthServicePort != "" {
+		authPort = config.AppConfig.AuthServicePort
+	}
+	loginURL := fmt.Sprintf("http://127.0.0.1:%s/login", authPort)
 	payload, _ := json.Marshal(map[string]string{
 		"email":    email,
 		"password": password,

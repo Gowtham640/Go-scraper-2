@@ -3,9 +3,11 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
+	"srm-academia-scraper/config"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 )
@@ -23,7 +25,12 @@ func HealthHandler() http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:3001", nil)
+		authPort := "3001"
+		if config.AppConfig != nil && config.AppConfig.AuthServicePort != "" {
+			authPort = config.AppConfig.AuthServicePort
+		}
+		authPingURL := fmt.Sprintf("http://127.0.0.1:%s", authPort)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, authPingURL, nil)
 		if err == nil {
 			client := &http.Client{
 				Timeout: 500 * time.Millisecond,
