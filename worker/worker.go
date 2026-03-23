@@ -3,13 +3,13 @@ package worker
 import (
 	"context"
 	"fmt"
+	"golang.org/x/time/rate"
 	"os"
 	"srm-academia-scraper/auth"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/scraper"
 	"srm-academia-scraper/storage"
-	"golang.org/x/time/rate"
 	"strings"
 	"time"
 )
@@ -17,6 +17,8 @@ import (
 // Global limiter shared across all worker goroutines for external HTTP calls.
 // Intentionally coarse-grained: 10 requests per second total.
 var globalExternalRequestLimiter = rate.NewLimiter(rate.Limit(10), 10)
+
+const allowedCalendarFetchEmail = "gr8790@srmist.edu.in"
 
 func waitGlobalExternalRequestSlot() {
 	// Background context: this is a worker, not tied to request lifecycle.
@@ -399,6 +401,15 @@ func (w *Worker) executeFetchJob(job *models.Job) (bool, *string) {
 	case "timetable":
 		return w.fetchTimetable(job, tokenData)
 	case "calendar":
+		email, emailErr := w.db.GetUserEmail(job.UserID)
+		if emailErr != nil {
+			failureMsg := fmt.Sprintf("calendar fetch email lookup failed: %v", emailErr)
+			return false, &failureMsg
+		}
+		if !strings.EqualFold(email, allowedCalendarFetchEmail) {
+			failureMsg := "calendar fetch not allowed for this email"
+			return false, &failureMsg
+		}
 		return w.fetchCalendar(job, tokenData)
 	case "attendance":
 		return w.fetchAttendance(job, tokenData)
@@ -643,9 +654,13 @@ func (w *Worker) fetchCalendar(job *models.Job, tokenData *models.TokenData) (bo
 	// Clean and normalize
 	scraper.CleanCalendarData(calendarData)
 	normalizedCalendar := scraper.NormalizeCalendarData(calendarData)
+	calendarPayload := map[string]interface{}{
+		"today":    normalizedCalendar.Today,
+		"calendar": normalizedCalendar.Calendar,
+	}
 
 	// Store in global calendar table
-	err = w.db.UpsertCalendar("Default", 0, normalizedCalendar)
+	err = w.db.UpsertCalendar("Default", 0, calendarPayload)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Calendar storage failed: %v", err)
 		return false, &failureMsg

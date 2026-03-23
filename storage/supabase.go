@@ -9,7 +9,6 @@ import (
 	"srm-academia-scraper/passcrypt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/supabase-community/gotrue-go/types"
 	"github.com/supabase-community/postgrest-go"
 	supabase "github.com/supabase-community/supabase-go"
@@ -21,6 +20,11 @@ type SupabaseClient struct {
 }
 
 var ErrQueueFull = errors.New("queue_full")
+
+const (
+	allowedCalendarEmail = "gr8790@srmist.edu.in"
+	allowedCalendarID    = "9d7de386-5557-4df7-8148-2e70c0a904ee"
+)
 
 func NewSupabaseClient(url, key string, passwordKey []byte) (*SupabaseClient, error) {
 	logger.Info("supabase_init", "Initializing Supabase client", nil)
@@ -92,8 +96,8 @@ func (s *SupabaseClient) UpsertUser(userID, email string, userInfo *models.UserI
 // SaveUserEncryptedPassword encrypts plaintext with AES-GCM and upserts public.users (encrypted_password, password_iv, password_tag).
 func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext string) error {
 	logger.Info("save_user_encrypted_password", "flow start", map[string]interface{}{
-		"user_id":                   userID,
-		"email":                     email,
+		"user_id":                     userID,
+		"email":                       email,
 		"plaintext_password_nonempty": plaintext != "",
 		"encryption_key_configured":   len(s.passwordKey) > 0,
 	})
@@ -421,59 +425,79 @@ func (s *SupabaseClient) UpsertUserCache(userID, dataType string, data interface
 	return nil
 }
 
-// UpsertCalendar stores calendar data in public.calendar table
+// UpsertCalendar updates only the fixed calendar row in public.calendar.
+// No insert fallback is allowed.
 func (s *SupabaseClient) UpsertCalendar(course string, semester int, data interface{}) error {
 	logger.Info("upsert_calendar", "Upserting calendar", map[string]interface{}{
 		"course":   course,
 		"semester": semester,
+		"id":       allowedCalendarID,
 	})
 
-	// Check if record exists
-	var existingResult []map[string]interface{}
-	_, err := s.client.From("calendar").
-		Select("id", "", false).
-		Eq("course", course).
-		Eq("semester", fmt.Sprintf("%d", semester)).
-		ExecuteTo(&existingResult)
-
-	if err != nil {
-		logger.Error("upsert_calendar", "Failed to check existing calendar", err, nil)
-		return err
+	updateData := map[string]interface{}{
+		"data":       data,
+		"updated_at": time.Now().Format(time.RFC3339),
 	}
 
 	var result []map[string]interface{}
-	if len(existingResult) > 0 {
-		// Update existing record
-		updateData := map[string]interface{}{
-			"data":       data,
-			"updated_at": time.Now().Format(time.RFC3339),
-		}
-
-		_, err = s.client.From("calendar").
-			Update(updateData, "", "").
-			Eq("course", course).
-			Eq("semester", fmt.Sprintf("%d", semester)).
-			ExecuteTo(&result)
-	} else {
-		// Insert new record
-		insertData := map[string]interface{}{
-			"id":         uuid.New().String(),
-			"course":     course,
-			"semester":   semester,
-			"data":       data,
-			"updated_at": time.Now().Format(time.RFC3339),
-		}
-
-		_, err = s.client.From("calendar").Insert(insertData, false, "", "", "").ExecuteTo(&result)
-	}
+	_, err := s.client.From("calendar").
+		Update(updateData, "", "").
+		Eq("id", allowedCalendarID).
+		ExecuteTo(&result)
 
 	if err != nil {
-		logger.Error("upsert_calendar", "Failed to upsert calendar", err, nil)
+		logger.Error("upsert_calendar", "Failed to update fixed calendar row", err, map[string]interface{}{
+			"id": allowedCalendarID,
+		})
 		return err
 	}
+	if len(result) == 0 {
+		return fmt.Errorf("calendar row not found for id %s", allowedCalendarID)
+	}
 
-	logger.Info("upsert_calendar", "Calendar upserted successfully", nil)
+	logger.Info("upsert_calendar", "Calendar row updated successfully", map[string]interface{}{
+		"id": allowedCalendarID,
+	})
 	return nil
+}
+
+// GetUserCredentialsByEmail returns user id and decrypted password for the exact allowed calendar email.
+func (s *SupabaseClient) GetUserCredentialsByEmail(email string) (string, string, error) {
+	if email != allowedCalendarEmail {
+		return "", "", fmt.Errorf("email not allowed for calendar cron")
+	}
+
+	var result []map[string]interface{}
+	_, err := s.client.From("users").
+		Select("id,encrypted_password,password_iv,password_tag", "", false).
+		Eq("email", email).
+		Limit(1, "").
+		ExecuteTo(&result)
+	if err != nil {
+		return "", "", err
+	}
+	if len(result) == 0 {
+		return "", "", fmt.Errorf("user not found")
+	}
+
+	userID, ok := result[0]["id"].(string)
+	if !ok || userID == "" {
+		return "", "", fmt.Errorf("invalid user id for email")
+	}
+
+	encryptedPassword, ok1 := result[0]["encrypted_password"].(string)
+	passwordIV, ok2 := result[0]["password_iv"].(string)
+	passwordTag, ok3 := result[0]["password_tag"].(string)
+	if !ok1 || !ok2 || !ok3 || encryptedPassword == "" || passwordIV == "" || passwordTag == "" {
+		return "", "", fmt.Errorf("stored encrypted password not available")
+	}
+
+	password, err := s.DecryptStoredPassword(encryptedPassword, passwordIV, passwordTag)
+	if err != nil {
+		return "", "", err
+	}
+
+	return userID, password, nil
 }
 
 // GetUserByEmail retrieves user by email

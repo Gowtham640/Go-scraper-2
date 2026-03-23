@@ -254,6 +254,40 @@ func truncateAttendanceDate(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
+// ListUsersWithExpiredAttendanceCache returns up to limit users whose attendance cache is expired.
+// Query source is public.user_cache with data_type='attendance' and expires_at < now.
+func (s *SupabaseClient) ListUsersWithExpiredAttendanceCache(limit int) ([]string, error) {
+	if limit <= 0 {
+		return []string{}, nil
+	}
+
+	nowUTC := time.Now().UTC().Format(time.RFC3339)
+	var rows []map[string]interface{}
+	_, err := s.client.From("user_cache").
+		Select("user_id", "", false).
+		Eq("data_type", models.AttendanceDataType).
+		Lt("expires_at", nowUTC).
+		Order("expires_at", &postgrest.OrderOpts{Ascending: true}).
+		Limit(limit, "").
+		ExecuteTo(&rows)
+	if err != nil {
+		logger.Error("expired_attendance_cache_users", "Failed to query expired attendance cache users", err, map[string]interface{}{
+			"limit":   limit,
+			"now_utc": nowUTC,
+		})
+		return nil, err
+	}
+
+	userIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if userID, ok := row["user_id"].(string); ok && strings.TrimSpace(userID) != "" {
+			userIDs = append(userIDs, userID)
+		}
+	}
+
+	return userIDs, nil
+}
+
 // ListUsers returns the lightweight list of users that exist in the public.users table.
 func (s *SupabaseClient) ListUsers() ([]models.UserRecord, error) {
 	logger.Info("list_users", "STEP list_users_begin: paging public.users (id, email) for cron / scheduler", map[string]interface{}{
@@ -289,17 +323,17 @@ func (s *SupabaseClient) ListUsers() ([]models.UserRecord, error) {
 
 		if len(rows) == 0 {
 			logger.Info("list_users", "STEP list_users_page: empty page — end of table or no users", map[string]interface{}{
-				"page":           pageNum,
-				"offset":         offset,
-				"users_so_far":   len(allUsers),
-				"terminal":       true,
+				"page":         pageNum,
+				"offset":       offset,
+				"users_so_far": len(allUsers),
+				"terminal":     true,
 			})
 			break
 		}
 
 		logger.Info("list_users", "STEP list_users_page OK: rows received, validating id+email", map[string]interface{}{
-			"page":       pageNum,
-			"row_count":  len(rows),
+			"page":                     pageNum,
+			"row_count":                len(rows),
 			"users_so_far_before_page": len(allUsers),
 		})
 
@@ -310,15 +344,15 @@ func (s *SupabaseClient) ListUsers() ([]models.UserRecord, error) {
 			if !idOk || id == "" || !emailOk || email == "" {
 				skippedBad++
 				logger.Warn("list_users", "STEP list_users_row SKIP: row missing valid id or email (not added to cron user list)", map[string]interface{}{
-					"page":          pageNum,
-					"row_in_page":   rowIdx,
-					"id_ok":         idOk,
-					"id_empty":      id == "",
-					"email_ok":      emailOk,
-					"email_empty":   email == "",
-					"raw_id_type":   fmt.Sprintf("%T", row["id"]),
+					"page":           pageNum,
+					"row_in_page":    rowIdx,
+					"id_ok":          idOk,
+					"id_empty":       id == "",
+					"email_ok":       emailOk,
+					"email_empty":    email == "",
+					"raw_id_type":    fmt.Sprintf("%T", row["id"]),
 					"raw_email_type": fmt.Sprintf("%T", row["email"]),
-					"hint":          "public.users should have non-empty string id and email for attendance cron",
+					"hint":           "public.users should have non-empty string id and email for attendance cron",
 				})
 				continue
 			}
@@ -338,8 +372,8 @@ func (s *SupabaseClient) ListUsers() ([]models.UserRecord, error) {
 
 		if len(rows) < userListBatchSize {
 			logger.Info("list_users", "STEP list_users_page: partial page — last page of users", map[string]interface{}{
-				"page":       pageNum,
-				"row_count":  len(rows),
+				"page":        pageNum,
+				"row_count":   len(rows),
 				"users_total": len(allUsers),
 			})
 			break
@@ -368,11 +402,11 @@ func (s *SupabaseClient) HasRecentAttendanceFetchJob(userID string, since time.T
 		ExecuteTo(&rows)
 	if err != nil {
 		logger.Error("has_recent_attendance_job", "HasRecentAttendanceFetchJob FAILED: could not query public.jobs (cron idempotency check)", err, map[string]interface{}{
-			"user_id":       userID,
-			"filter_job_type": "fetch",
-			"filter_data_type": models.AttendanceDataType,
+			"user_id":                  userID,
+			"filter_job_type":          "fetch",
+			"filter_data_type":         models.AttendanceDataType,
 			"filter_created_after_utc": since.UTC().Format(time.RFC3339),
-			"hint":          "check RLS and service role access on public.jobs; verify created_at column exists",
+			"hint":                     "check RLS and service role access on public.jobs; verify created_at column exists",
 		})
 		return false, err
 	}
@@ -441,11 +475,11 @@ func (s *SupabaseClient) GetAttendanceSnapshots(userID, courseCode, slot string,
 	}
 
 	logger.Info("get_attendance_snapshots", "Fetched snapshot rows", map[string]interface{}{
-		"user_id":    userID,
-		"course":     courseCode,
-		"slot":       slot,
-		"raw_rows":   len(rows),
-		"limit":      limit,
+		"user_id":  userID,
+		"course":   courseCode,
+		"slot":     slot,
+		"raw_rows": len(rows),
+		"limit":    limit,
 	})
 
 	snapshots := make([]models.AttendanceSnapshot, 0, len(rows))

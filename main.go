@@ -108,8 +108,14 @@ func main() {
 		attendanceScheduler := scheduler.NewAttendanceScheduler(db, cfg.CronIntervalMinutes, cfg.CronBatchSize)
 		attendanceScheduler.Start()
 		logger.Info("attendance_scheduler_init", "Attendance scheduler started", nil)
+		calendarScheduler := scheduler.NewCalendarScheduler(db)
+		calendarScheduler.Start()
+		logger.Info("calendar_scheduler_init", "Calendar scheduler started", nil)
 	} else {
 		logger.Info("attendance_scheduler_init", "Attendance scheduler disabled by CRON_MODE", map[string]interface{}{
+			"cron_mode": os.Getenv("CRON_MODE"),
+		})
+		logger.Info("calendar_scheduler_init", "Calendar scheduler disabled by CRON_MODE", map[string]interface{}{
 			"cron_mode": os.Getenv("CRON_MODE"),
 		})
 	}
