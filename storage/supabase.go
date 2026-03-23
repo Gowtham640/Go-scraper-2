@@ -773,38 +773,6 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 		"priority":  req.Priority,
 	})
 
-	// Special handling for login jobs - don't store in DB, return login request
-	if req.JobType == "login" {
-		// Check global Playwright limit
-		runningCount, err := s.CountRunningLoginJobs()
-		if err != nil {
-			logger.Error("enqueue_job", "Failed to count running login jobs", err, nil)
-			return nil, nil, err
-		}
-
-		if runningCount >= 3 {
-			logger.Warn("enqueue_job", "Playwright limit reached", map[string]interface{}{
-				"running_login_jobs": runningCount,
-			})
-			return nil, nil, ErrQueueFull
-		}
-
-		// Return login request for worker
-		loginReq := &models.WorkerLoginRequest{
-			UserID:             req.UserID,
-			Email:              req.Email,
-			Password:           req.Password,
-			Priority:           req.Priority,
-			RequestedDataTypes: req.RequestedDataTypes,
-		}
-
-		logger.Info("enqueue_job", "Login request created", map[string]interface{}{
-			"user_id": req.UserID,
-			"email":   req.Email,
-		})
-		return nil, loginReq, nil
-	}
-
 	// Regular job handling for fetch jobs
 	// Check for existing active job (deduplication)
 	var existingResult []map[string]interface{}
@@ -893,6 +861,22 @@ func (s *SupabaseClient) CountRunningLoginJobs() (int, error) {
 	return len(result), nil
 }
 
+// CountPendingLoginJobs counts currently pending login jobs (queue soft gate).
+func (s *SupabaseClient) CountPendingLoginJobs() (int, error) {
+	var result []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("id", "", false).
+		Eq("job_type", "login").
+		Eq("status", "pending").
+		ExecuteTo(&result)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return len(result), nil
+}
+
 // ClaimNextJob atomically claims the next pending job for execution
 func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 
@@ -901,6 +885,7 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 	_, err := s.client.From("jobs").
 		Select("*", "", false).
 		Eq("status", "pending").
+		Eq("job_type", "fetch").
 		Neq("data_type", models.AttendanceDataType).
 		Order("priority", &postgrest.OrderOpts{Ascending: false}).
 		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
@@ -991,6 +976,7 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 	_, err := s.client.From("jobs").
 		Select("*", "", false).
 		Eq("status", "pending").
+		Eq("job_type", "fetch").
 		Eq("data_type", models.AttendanceDataType).
 		In("priority", []string{
 			fmt.Sprintf("%d", models.JobPriorityLowest),
@@ -1071,6 +1057,85 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 		"priority":  job.Priority,
 	})
 
+	return job, nil
+}
+
+// ClaimNextLoginJob claims only pending login jobs for execution.
+func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
+	var jobsResult []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("*", "", false).
+		Eq("status", "pending").
+		Eq("job_type", "login").
+		Order("priority", &postgrest.OrderOpts{Ascending: false}).
+		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
+		Limit(1, "").
+		ExecuteTo(&jobsResult)
+	if err != nil {
+		logger.Error("claim_next_login_job", "Failed to find next login job", err, nil)
+		return nil, err
+	}
+	if len(jobsResult) == 0 {
+		return nil, nil
+	}
+
+	jobData := jobsResult[0]
+	jobID := jobData["id"].(string)
+
+	// Atomically claim the job.
+	now := time.Now().Format(time.RFC3339)
+	updateData := map[string]interface{}{
+		"status":     "running",
+		"started_at": now,
+	}
+
+	var updateResult []map[string]interface{}
+	_, err = s.client.From("jobs").
+		Update(updateData, "", "").
+		Eq("id", jobID).
+		Eq("status", "pending").
+		ExecuteTo(&updateResult)
+	if err != nil {
+		logger.Error("claim_next_login_job", "Failed to claim login job", err, nil)
+		return nil, err
+	}
+	if len(updateResult) == 0 {
+		logger.Info("claim_next_login_job", "Login job was claimed by another worker", map[string]interface{}{
+			"job_id": jobID,
+		})
+		return nil, nil
+	}
+
+	job := &models.Job{
+		ID:         jobID,
+		UserID:     jobData["user_id"].(string),
+		JobType:    jobData["job_type"].(string),
+		DataType:   jobData["data_type"].(string),
+		Status:     "running",
+		Priority:   int(jobData["priority"].(float64)),
+		RetryCount: int(jobData["retry_count"].(float64)),
+	}
+
+	if createdAtStr, ok := jobData["created_at"].(string); ok {
+		if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+			job.CreatedAt = createdAt
+		}
+	}
+	if startedAtStr, ok := jobData["started_at"].(string); ok {
+		if startedAt, err := time.Parse(time.RFC3339, startedAtStr); err == nil {
+			job.StartedAt = &startedAt
+		}
+	}
+	if failureReason, ok := jobData["failure_reason"].(string); ok {
+		job.FailureReason = &failureReason
+	}
+
+	logger.Info("claim_next_login_job", "Login job claimed successfully", map[string]interface{}{
+		"job_id":    job.ID,
+		"user_id":   job.UserID,
+		"data_type": job.DataType,
+		"priority":  job.Priority,
+	})
 	return job, nil
 }
 

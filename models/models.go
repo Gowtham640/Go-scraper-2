@@ -215,6 +215,9 @@ type Job struct {
 	// Credentials for login jobs (not stored in DB, passed in memory)
 	Email    string `json:"-"` // JSON omit
 	Password string `json:"-"` // JSON omit
+	// RequestedDataTypes is used only for login jobs to determine which fetch jobs
+	// to enqueue after successful login.
+	RequestedDataTypes []string `json:"-"` // JSON omit
 }
 
 // JobCreateRequest represents the data needed to create a job

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"srm-academia-scraper/auth"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/storage"
@@ -44,10 +43,10 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 
 		logger.InfoWithUser(email, "login_handler", "Processing login request", nil)
 
-		// Check global Playwright limit before proceeding
-		runningCount, err := db.CountRunningLoginJobs()
+		// Soft gate based on pending login queue depth in public.jobs
+		pendingCount, err := db.CountPendingLoginJobs()
 		if err != nil {
-			logger.ErrorWithUser(email, "login_handler", "Failed to check running jobs", err, nil)
+			logger.ErrorWithUser(email, "login_handler", "Failed to check pending login jobs", err, nil)
 			sendJSONResponse(w, email, models.LoginResponse{
 				Success: false,
 				Error:   "Service temporarily unavailable",
@@ -55,9 +54,9 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			return
 		}
 
-		if runningCount >= 3 {
-			logger.WarnWithUser(email, "login_handler", "Playwright limit reached", map[string]interface{}{
-				"running_jobs": runningCount,
+		if pendingCount > 10 {
+			logger.WarnWithUser(email, "login_handler", "Pending login queue limit reached", map[string]interface{}{
+				"pending_jobs": pendingCount,
 			})
 			sendJSONResponse(w, email, models.LoginResponse{
 				Success: false,
@@ -66,38 +65,64 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			return
 		}
 
-		// Initialize session manager for browser login
-		sessionManager := auth.NewSessionManager(db)
-
-		// Perform login and create user in auth.users, store token
-		userID, err := sessionManager.LoginAndCreateUser(email, req.Password)
+		// Ensure we have a user ID for enqueued login jobs.
+		userID, err := db.GetUserByEmail(email)
 		if err != nil {
-			logger.ErrorWithUser(email, "login_handler", "Login failed", err, nil)
+			// User may not exist yet in auth.users; create and continue.
+			userID, err = db.CreateAuthUser(email, req.Password)
+			if err != nil {
+				logger.ErrorWithUser(email, "login_handler", "Failed to resolve user for login job enqueue", err, nil)
+				sendJSONResponse(w, email, models.LoginResponse{
+					Success: false,
+					Error:   "Authentication failed",
+				})
+				return
+			}
+		}
+
+		// Persist encrypted portal password so login workers can execute queued login jobs.
+		if saveErr := db.SaveUserEncryptedPassword(userID, email, req.Password); saveErr != nil {
+			logger.ErrorWithUser(email, "login_handler", "Failed to persist encrypted password before enqueue", saveErr, map[string]interface{}{
+				"user_id": userID,
+			})
 			sendJSONResponse(w, email, models.LoginResponse{
 				Success: false,
-				Error:   "Authentication failed",
+				Error:   "Service temporarily unavailable",
 			})
 			return
 		}
 
-		logger.InfoWithUser(email, "login_handler", "Login successful (encrypted password upsert attempted inside session)", map[string]interface{}{
+		// Enqueue direct login request into public.jobs (single source of truth).
+		jobReq := models.JobCreateRequest{
+			UserID:             userID,
+			JobType:            "login",
+			DataType:           "auth",
+			Priority:           100,
+			Email:              email,
+			Password:           req.Password,
+			RequestedDataTypes: []string{},
+		}
+		_, _, err = db.EnqueueJob(jobReq)
+		if err != nil && err.Error() != "job already exists" {
+			logger.ErrorWithUser(email, "login_handler", "Failed to enqueue direct login job", err, map[string]interface{}{
+				"user_id": userID,
+			})
+			sendJSONResponse(w, email, models.LoginResponse{
+				Success: false,
+				Error:   "Service temporarily unavailable",
+			})
+			return
+		}
+
+		logger.InfoWithUser(email, "login_handler", "Login job accepted and queued", map[string]interface{}{
 			"user_id": userID,
 		})
 
-		// Return success with user ID
+		// Return success with user ID (worker will process login from public.jobs).
 		sendJSONResponse(w, email, models.LoginResponse{
 			Success: true,
 			UserId:  userID,
 		})
-
-		// Fetch user info asynchronously (kept around for later caching)
-		go func(requestEmail string) {
-			if _, err := sessionManager.FetchUserInfo(userID, requestEmail); err != nil {
-				logger.WarnWithUser(requestEmail, "login_handler", "Async user info fetch failed", map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		}(email)
 	}
 }
 

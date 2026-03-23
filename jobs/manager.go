@@ -51,7 +51,7 @@ func (m *Manager) EnqueueJob(req models.JobCreateRequest) error {
 	})
 
 	// Use the database method that returns appropriate objects
-	job, loginReq, err := m.db.EnqueueJob(req)
+	job, _, err := m.db.EnqueueJob(req)
 	if err != nil {
 		if err.Error() == "queue_full" {
 			return err
@@ -60,19 +60,6 @@ func (m *Manager) EnqueueJob(req models.JobCreateRequest) error {
 			return nil // This is not an error for handlers
 		}
 		return err
-	}
-
-	// Handle login requests by sending to worker
-	if loginReq != nil {
-		workerLoginReq := models.WorkerLoginRequest{
-			UserID:             loginReq.UserID,
-			Email:              loginReq.Email,
-			Password:           loginReq.Password,
-			Priority:           loginReq.Priority,
-			RequestedDataTypes: loginReq.RequestedDataTypes,
-		}
-		m.worker.EnqueueLoginRequest(workerLoginReq)
-		return nil
 	}
 
 	// Handle regular jobs (fetch jobs)
