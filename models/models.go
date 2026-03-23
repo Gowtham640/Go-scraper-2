@@ -215,6 +215,9 @@ type Job struct {
 	// Credentials for login jobs (not stored in DB, passed in memory)
 	Email    string `json:"-"` // JSON omit
 	Password string `json:"-"` // JSON omit
+	// RequestedDataTypes is used only for login jobs to determine which fetch jobs
+	// to enqueue after successful login.
+	RequestedDataTypes []string `json:"-"` // JSON omit
 }
 
 // JobCreateRequest represents the data needed to create a job
@@ -238,9 +241,109 @@ type WorkerLoginRequest struct {
 }
 
 const (
-	// AttendanceDataType marks the data type string used for attendance jobs.
-	AttendanceDataType = "attendance"
-
-	// JobPriorityLowest is the priority assigned to the dedicated attendance worker.
 	JobPriorityLowest = 1
 )
+
+const (
+	AttendanceDataType = "attendance"
+)
+
+const (
+	DeltaTypeNoChange   = "NO_CHANGE"
+	DeltaTypeAddition   = "ADDITION"
+	DeltaTypeCorrection = "CORRECTION"
+	DeltaTypeMixed      = "MIXED"
+)
+
+const (
+	TentativeStatusPending   = "PENDING"
+	TentativeStatusReverted  = "REVERTED"
+	TentativeStatusConfirmed = "CONFIRMED"
+)
+
+// AttendanceSnapshot represents a single ingestion of attendance counters for a course
+type AttendanceSnapshot struct {
+	ID                   string    `json:"id"`
+	UserID               string    `json:"userId"`
+	Slot                 string    `json:"slot"`
+	Faculty              string    `json:"faculty"`
+	Category             string    `json:"category"`
+	CourseCode           string    `json:"courseCode"`
+	CourseTitle          string    `json:"courseTitle"`
+	HoursAbsent          int       `json:"hoursAbsent"`
+	HoursConducted       int       `json:"hoursConducted"`
+	AttendancePercentage int       `json:"attendancePercentage"`
+	FetchedAt            time.Time `json:"fetchedAt"`
+	CreatedAt            time.Time `json:"createdAt"`
+}
+
+// AttendanceDelta captures the delta computed between snapshot pairs
+type AttendanceDelta struct {
+	ID                  string    `json:"id"`
+	UserID              string    `json:"userId"`
+	CourseCode          string    `json:"courseCode"`
+	Slot                string    `json:"slot,omitempty"` // set in worker for logs / timetable match; not stored in attendance_deltas unless column exists
+	PrevFetchedAt       time.Time `json:"-"`              // snapshot times for tentative source range; not stored in DB unless column exists
+	CurrFetchedAt       time.Time `json:"-"`
+	PrevHoursAbsent     int       `json:"prevHoursAbsent"`
+	PrevHoursConducted  int       `json:"prevHoursConducted"`
+	CurrHoursAbsent     int       `json:"currHoursAbsent"`
+	CurrHoursConducted  int       `json:"currHoursConducted"`
+	DeltaHoursAbsent    int       `json:"deltaHoursAbsent"`
+	DeltaHoursConducted int       `json:"deltaHoursConducted"`
+	DeltaHoursPresent   int       `json:"deltaHoursPresent"`
+	DeltaType           string    `json:"deltaType"`
+	ComputedAt          time.Time `json:"computedAt"`
+}
+
+// TentativeAttendanceEvent represents an inference that can later be confirmed or reverted
+type TentativeAttendanceEvent struct {
+	ID                   string    `json:"id"`
+	UserID               string    `json:"userId"`
+	CourseCode           string    `json:"courseCode"`
+	InferredHoursAbsent  int       `json:"inferredHoursAbsent"`
+	InferredHoursPresent int       `json:"inferredHoursPresent"`
+	CandidateStartDate   time.Time `json:"candidateStartDate"`
+	CandidateEndDate     time.Time `json:"candidateEndDate"`
+	Status               string    `json:"status"` // PENDING | REVERTED | CONFIRMED
+	InferredAt           time.Time `json:"inferredAt"`
+	ExpiresAt            time.Time `json:"expiresAt"`
+	ConfidenceScore      float64   `json:"confidenceScore"`
+	IsAmbiguous          bool      `json:"isAmbiguous"`
+	SourceSnapshotRange  string    `json:"sourceSnapshotRange,omitempty"` // PostgreSQL tstzrange literal for API
+}
+
+// FinalAttendanceEvent represents a confirmed attendance assignment
+type FinalAttendanceEvent struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"userId"`
+	CourseCode   string    `json:"courseCode"`
+	CourseTitle  string    `json:"courseTitle"`
+	Category     string    `json:"category"`
+	ClassDate    time.Time `json:"classDate"`
+	HoursAbsent  int       `json:"hoursAbsent"`
+	HoursPresent int       `json:"hoursPresent"`
+	FinalizedAt  time.Time `json:"finalizedAt"`
+}
+
+// CourseScheduleEntry represents a single scheduled slot for a course
+type CourseScheduleEntry struct {
+	CourseCode string `json:"courseCode"`
+	Slot       string `json:"slot"`
+	Weekday    int    `json:"weekday"`   // 1 = Monday, 7 = Sunday
+	StartTime  string `json:"startTime"` // Stored as HH:MM:SS
+	EndTime    string `json:"endTime"`
+}
+
+// AcademicCalendarEntry represents a holiday/non-holiday entry
+type AcademicCalendarEntry struct {
+	Date        time.Time `json:"date"`
+	IsHoliday   bool      `json:"isHoliday"`
+	Description *string   `json:"description"`
+}
+
+// UserRecord is a lightweight representation of users stored in Supabase
+type UserRecord struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}

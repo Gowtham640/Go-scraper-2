@@ -55,3 +55,7 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+node_modules/
+*.html
+server
+temp_script_debug.py

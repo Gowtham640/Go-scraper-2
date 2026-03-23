@@ -32,6 +32,11 @@ func (m *Manager) GetToken(userID string) (*models.TokenData, error) {
 	return m.db.GetToken(userID)
 }
 
+// SaveUserEncryptedPassword encrypts and upserts the portal password to public.users (same as storage).
+func (m *Manager) SaveUserEncryptedPassword(userID, email, password string) error {
+	return m.db.SaveUserEncryptedPassword(userID, email, password)
+}
+
 // GetUserCache retrieves cached data for a user and data type
 func (m *Manager) GetUserCache(userID, dataType string) (interface{}, error) {
 	return m.db.GetUserCache(userID, dataType)
@@ -46,7 +51,7 @@ func (m *Manager) EnqueueJob(req models.JobCreateRequest) error {
 	})
 
 	// Use the database method that returns appropriate objects
-	job, loginReq, err := m.db.EnqueueJob(req)
+	job, _, err := m.db.EnqueueJob(req)
 	if err != nil {
 		if err.Error() == "queue_full" {
 			return err
@@ -55,19 +60,6 @@ func (m *Manager) EnqueueJob(req models.JobCreateRequest) error {
 			return nil // This is not an error for handlers
 		}
 		return err
-	}
-
-	// Handle login requests by sending to worker
-	if loginReq != nil {
-		workerLoginReq := models.WorkerLoginRequest{
-			UserID:             loginReq.UserID,
-			Email:              loginReq.Email,
-			Password:           loginReq.Password,
-			Priority:           loginReq.Priority,
-			RequestedDataTypes: loginReq.RequestedDataTypes,
-		}
-		m.worker.EnqueueLoginRequest(workerLoginReq)
-		return nil
 	}
 
 	// Handle regular jobs (fetch jobs)

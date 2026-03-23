@@ -2,9 +2,11 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
+	"srm-academia-scraper/passcrypt"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,10 +16,13 @@ import (
 )
 
 type SupabaseClient struct {
-	client *supabase.Client
+	client      *supabase.Client
+	passwordKey []byte
 }
 
-func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
+var ErrQueueFull = errors.New("queue_full")
+
+func NewSupabaseClient(url, key string, passwordKey []byte) (*SupabaseClient, error) {
 	logger.Info("supabase_init", "Initializing Supabase client", nil)
 
 	client, err := supabase.NewClient(url, key, nil)
@@ -27,7 +32,7 @@ func NewSupabaseClient(url, key string) (*SupabaseClient, error) {
 	}
 
 	logger.Info("supabase_init", "Supabase client initialized successfully", nil)
-	return &SupabaseClient{client: client}, nil
+	return &SupabaseClient{client: client, passwordKey: passwordKey}, nil
 }
 
 // CreateAuthUser creates a user in auth.users table
@@ -84,6 +89,100 @@ func (s *SupabaseClient) UpsertUser(userID, email string, userInfo *models.UserI
 	return nil
 }
 
+// SaveUserEncryptedPassword encrypts plaintext with AES-GCM and upserts public.users (encrypted_password, password_iv, password_tag).
+func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext string) error {
+	logger.Info("save_user_encrypted_password", "flow start", map[string]interface{}{
+		"user_id":                   userID,
+		"email":                     email,
+		"plaintext_password_nonempty": plaintext != "",
+		"encryption_key_configured":   len(s.passwordKey) > 0,
+	})
+	if userID == "" {
+		logger.Error("save_user_encrypted_password", "abort: user id empty", nil, nil)
+		return fmt.Errorf("user id required")
+	}
+	if email == "" {
+		logger.Error("save_user_encrypted_password", "abort: email empty", nil, map[string]interface{}{"user_id": userID})
+		return fmt.Errorf("email required")
+	}
+	if plaintext == "" {
+		logger.Error("save_user_encrypted_password", "abort: password plaintext empty", nil, map[string]interface{}{"user_id": userID})
+		return fmt.Errorf("empty password")
+	}
+	if len(s.passwordKey) == 0 {
+		logger.Error("save_user_encrypted_password", "abort: PASSWORD_KEY not loaded on client", nil, map[string]interface{}{"user_id": userID})
+		return fmt.Errorf("password key not configured")
+	}
+
+	logger.Info("save_user_encrypted_password", "encrypt: invoking AES-GCM", map[string]interface{}{
+		"user_id": userID,
+	})
+	encB64, ivB64, tagB64, err := passcrypt.EncryptAESGCM(plaintext, s.passwordKey)
+	if err != nil {
+		logger.Error("save_user_encrypted_password", "encrypt: AES-GCM failed", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return err
+	}
+	logger.Info("save_user_encrypted_password", "encrypt: succeeded", map[string]interface{}{
+		"user_id":            userID,
+		"ciphertext_b64_len": len(encB64),
+		"nonce_b64_len":      len(ivB64),
+		"tag_b64_len":        len(tagB64),
+	})
+
+	// Upsert so a row exists even before profile fields are filled by FetchUserInfo.
+	data := map[string]interface{}{
+		"id":                 userID,
+		"email":              email,
+		"role":               "public",
+		"encrypted_password": encB64,
+		"password_iv":        ivB64,
+		"password_tag":       tagB64,
+	}
+
+	logger.Info("save_user_encrypted_password", "upsert: posting to public.users", map[string]interface{}{
+		"user_id": userID,
+	})
+	var result []map[string]interface{}
+	_, err = s.client.From("users").Upsert(data, "", "", "").ExecuteTo(&result)
+
+	if err != nil {
+		logger.Error("save_user_encrypted_password", "upsert: Supabase request failed", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return err
+	}
+
+	logger.Info("save_user_encrypted_password", "upsert: completed OK (encrypted_password, password_iv, password_tag)", map[string]interface{}{
+		"user_id": userID,
+	})
+	return nil
+}
+
+// DecryptStoredPassword decrypts public.users password fields using the same PASSWORD_KEY as SaveUserEncryptedPassword.
+func (s *SupabaseClient) DecryptStoredPassword(encryptedPasswordB64, passwordIVB64, passwordTagB64 string) (string, error) {
+	logger.Info("decrypt_stored_password", "flow start", map[string]interface{}{
+		"encryption_key_configured": len(s.passwordKey) > 0,
+		"ciphertext_b64_nonempty":   encryptedPasswordB64 != "",
+		"nonce_b64_nonempty":        passwordIVB64 != "",
+		"tag_b64_nonempty":          passwordTagB64 != "",
+	})
+	if len(s.passwordKey) == 0 {
+		logger.Error("decrypt_stored_password", "abort: password key not configured", nil, nil)
+		return "", fmt.Errorf("password key not configured")
+	}
+	plain, err := passcrypt.DecryptAESGCM(encryptedPasswordB64, passwordIVB64, passwordTagB64, s.passwordKey)
+	if err != nil {
+		logger.Error("decrypt_stored_password", "decrypt: AES-GCM Open failed", err, nil)
+		return "", err
+	}
+	logger.Info("decrypt_stored_password", "decrypt: succeeded", map[string]interface{}{
+		"plaintext_len": len(plain),
+	})
+	return plain, nil
+}
+
 // UpsertToken stores or updates session tokens in public.tokens table
 func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays int) error {
 	logger.InfoWithUser(email, "upsert_token", "Upserting token", map[string]interface{}{
@@ -117,6 +216,7 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 			"tokens":           tokens,
 			"expiry_timestamp": expiryTimestamp.Format(time.RFC3339),
 			"email":            email,
+			"failure_count":    0,
 		}
 
 		logger.InfoWithUser(email, "upsert_token", "Updating existing token", map[string]interface{}{"token_id": existing[0]["id"]})
@@ -138,6 +238,85 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 
 	logger.InfoWithUser(email, "upsert_token", "Token upserted successfully", nil)
 	return nil
+}
+
+// IncrementTokenFailureCount increments failure_count for a token row and returns the updated value.
+func (s *SupabaseClient) IncrementTokenFailureCount(userID string, failureReason *string) (int, error) {
+	logger.Info("increment_token_failure_count", "Incrementing token failure_count", map[string]interface{}{
+		"user_id": userID,
+	})
+
+	var currentResult []map[string]interface{}
+	_, err := s.client.From("tokens").
+		Select("failure_count", "", false).
+		Eq("user_id", userID).
+		Limit(1, "").
+		ExecuteTo(&currentResult)
+	if err != nil {
+		logger.Error("increment_token_failure_count", "Failed to fetch current failure_count", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return 0, err
+	}
+	if len(currentResult) == 0 {
+		return 0, fmt.Errorf("token not found for user")
+	}
+
+	currentCountFloat, ok := currentResult[0]["failure_count"].(float64)
+	if !ok {
+		return 0, fmt.Errorf("invalid failure_count type")
+	}
+	nextCount := int(currentCountFloat) + 1
+
+	updateData := map[string]interface{}{
+		"failure_count": nextCount,
+	}
+	if failureReason != nil {
+		updateData["failure_reason"] = *failureReason
+	}
+
+	var updateResult []map[string]interface{}
+	_, err = s.client.From("tokens").
+		Update(updateData, "", "").
+		Eq("user_id", userID).
+		ExecuteTo(&updateResult)
+	if err != nil {
+		logger.Error("increment_token_failure_count", "Failed to update failure_count", err, map[string]interface{}{
+			"user_id": userID,
+		})
+		return 0, err
+	}
+
+	logger.Info("increment_token_failure_count", "Token failure_count incremented", map[string]interface{}{
+		"user_id":       userID,
+		"failure_count": nextCount,
+	})
+	return nextCount, nil
+}
+
+// GetUserDecryptedPassword returns the stored decrypted portal password for a user.
+func (s *SupabaseClient) GetUserDecryptedPassword(userID string) (string, error) {
+	var result []map[string]interface{}
+	_, err := s.client.From("users").
+		Select("encrypted_password,password_iv,password_tag", "", false).
+		Eq("id", userID).
+		Limit(1, "").
+		ExecuteTo(&result)
+	if err != nil {
+		return "", err
+	}
+	if len(result) == 0 {
+		return "", fmt.Errorf("user not found")
+	}
+
+	encryptedPassword, ok1 := result[0]["encrypted_password"].(string)
+	passwordIV, ok2 := result[0]["password_iv"].(string)
+	passwordTag, ok3 := result[0]["password_tag"].(string)
+	if !ok1 || !ok2 || !ok3 || encryptedPassword == "" || passwordIV == "" || passwordTag == "" {
+		return "", fmt.Errorf("stored encrypted password not available")
+	}
+
+	return s.DecryptStoredPassword(encryptedPassword, passwordIV, passwordTag)
 }
 
 // GetToken retrieves token by user ID
@@ -594,38 +773,6 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 		"priority":  req.Priority,
 	})
 
-	// Special handling for login jobs - don't store in DB, return login request
-	if req.JobType == "login" {
-		// Check global Playwright limit
-		runningCount, err := s.CountRunningLoginJobs()
-		if err != nil {
-			logger.Error("enqueue_job", "Failed to count running login jobs", err, nil)
-			return nil, nil, err
-		}
-
-		if runningCount >= 3 {
-			logger.Warn("enqueue_job", "Playwright limit reached", map[string]interface{}{
-				"running_login_jobs": runningCount,
-			})
-			return nil, nil, fmt.Errorf("queue_full")
-		}
-
-		// Return login request for worker
-		loginReq := &models.WorkerLoginRequest{
-			UserID:             req.UserID,
-			Email:              req.Email,
-			Password:           req.Password,
-			Priority:           req.Priority,
-			RequestedDataTypes: req.RequestedDataTypes,
-		}
-
-		logger.Info("enqueue_job", "Login request created", map[string]interface{}{
-			"user_id": req.UserID,
-			"email":   req.Email,
-		})
-		return nil, loginReq, nil
-	}
-
 	// Regular job handling for fetch jobs
 	// Check for existing active job (deduplication)
 	var existingResult []map[string]interface{}
@@ -714,6 +861,22 @@ func (s *SupabaseClient) CountRunningLoginJobs() (int, error) {
 	return len(result), nil
 }
 
+// CountPendingLoginJobs counts currently pending login jobs (queue soft gate).
+func (s *SupabaseClient) CountPendingLoginJobs() (int, error) {
+	var result []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("id", "", false).
+		Eq("job_type", "login").
+		Eq("status", "pending").
+		ExecuteTo(&result)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return len(result), nil
+}
+
 // ClaimNextJob atomically claims the next pending job for execution
 func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 
@@ -722,6 +885,7 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 	_, err := s.client.From("jobs").
 		Select("*", "", false).
 		Eq("status", "pending").
+		Eq("job_type", "fetch").
 		Neq("data_type", models.AttendanceDataType).
 		Order("priority", &postgrest.OrderOpts{Ascending: false}).
 		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
@@ -812,8 +976,12 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 	_, err := s.client.From("jobs").
 		Select("*", "", false).
 		Eq("status", "pending").
+		Eq("job_type", "fetch").
 		Eq("data_type", models.AttendanceDataType).
-		Order("priority", &postgrest.OrderOpts{Ascending: false}).
+		In("priority", []string{
+			fmt.Sprintf("%d", models.JobPriorityLowest),
+			"10",
+		}).
 		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
 		Limit(1, "").
 		ExecuteTo(&jobsResult)
@@ -889,6 +1057,85 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 		"priority":  job.Priority,
 	})
 
+	return job, nil
+}
+
+// ClaimNextLoginJob claims only pending login jobs for execution.
+func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
+	var jobsResult []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("*", "", false).
+		Eq("status", "pending").
+		Eq("job_type", "login").
+		Order("priority", &postgrest.OrderOpts{Ascending: false}).
+		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
+		Limit(1, "").
+		ExecuteTo(&jobsResult)
+	if err != nil {
+		logger.Error("claim_next_login_job", "Failed to find next login job", err, nil)
+		return nil, err
+	}
+	if len(jobsResult) == 0 {
+		return nil, nil
+	}
+
+	jobData := jobsResult[0]
+	jobID := jobData["id"].(string)
+
+	// Atomically claim the job.
+	now := time.Now().Format(time.RFC3339)
+	updateData := map[string]interface{}{
+		"status":     "running",
+		"started_at": now,
+	}
+
+	var updateResult []map[string]interface{}
+	_, err = s.client.From("jobs").
+		Update(updateData, "", "").
+		Eq("id", jobID).
+		Eq("status", "pending").
+		ExecuteTo(&updateResult)
+	if err != nil {
+		logger.Error("claim_next_login_job", "Failed to claim login job", err, nil)
+		return nil, err
+	}
+	if len(updateResult) == 0 {
+		logger.Info("claim_next_login_job", "Login job was claimed by another worker", map[string]interface{}{
+			"job_id": jobID,
+		})
+		return nil, nil
+	}
+
+	job := &models.Job{
+		ID:         jobID,
+		UserID:     jobData["user_id"].(string),
+		JobType:    jobData["job_type"].(string),
+		DataType:   jobData["data_type"].(string),
+		Status:     "running",
+		Priority:   int(jobData["priority"].(float64)),
+		RetryCount: int(jobData["retry_count"].(float64)),
+	}
+
+	if createdAtStr, ok := jobData["created_at"].(string); ok {
+		if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+			job.CreatedAt = createdAt
+		}
+	}
+	if startedAtStr, ok := jobData["started_at"].(string); ok {
+		if startedAt, err := time.Parse(time.RFC3339, startedAtStr); err == nil {
+			job.StartedAt = &startedAt
+		}
+	}
+	if failureReason, ok := jobData["failure_reason"].(string); ok {
+		job.FailureReason = &failureReason
+	}
+
+	logger.Info("claim_next_login_job", "Login job claimed successfully", map[string]interface{}{
+		"job_id":    job.ID,
+		"user_id":   job.UserID,
+		"data_type": job.DataType,
+		"priority":  job.Priority,
+	})
 	return job, nil
 }
 
