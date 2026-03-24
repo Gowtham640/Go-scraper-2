@@ -32,34 +32,73 @@ const proxiedConsole = new Proxy(baseConsole, {
 globalThis.console = proxiedConsole;
 
 const PORT = process.env.AUTH_SERVICE_PORT || 3001;
-const CONTEXT_COUNT = 3;
-const pool = [];
-let browser;
+const WORKER_COUNT = 2;
+const CONTEXTS_PER_WORKER = 3;
+const TASK_TIMEOUT_MS = parseInt(process.env.TIMEOUT_SECONDS || '40', 10) * 1000;
 
-async function bootstrap() {
-  browser = await chromium.launch({
+const browserWorkers = Array.from({ length: WORKER_COUNT }, (_, index) => ({
+  id: index,
+  active: 0,
+  slots: Array.from({ length: CONTEXTS_PER_WORKER }, () => false),
+  slotContexts: Array.from({ length: CONTEXTS_PER_WORKER }, () => null),
+  tasksHandled: 0,
+  browser: null,
+  launching: null
+}));
+
+async function launchBrowserForWorker(worker) {
+  if (worker.launching) {
+    return worker.launching;
+  }
+
+  worker.launching = chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
+  }).then(browser => {
+    worker.browser = browser;
+    worker.launching = null;
+    browser.on('disconnected', () => {
+      console.error(`worker-${worker.id} browser disconnected, forcing restart on next task`);
+      worker.browser = null;
+    });
+    console.log(`worker-${worker.id} browser ready`);
+    return browser;
+  }).catch(err => {
+    worker.launching = null;
+    throw err;
   });
 
-  for (let i = 0; i < CONTEXT_COUNT; i++) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    });
-    const page = await context.newPage();
-    pool.push({ id: i, busy: false, context, page });
-    console.log(`context-${i} ready`);
-  }
+  return worker.launching;
 }
 
-function acquireContext() {
-  return new Promise(resolve => {
+async function ensureWorkerBrowser(worker) {
+  if (worker.browser && worker.browser.isConnected()) {
+    return worker.browser;
+  }
+  return launchBrowserForWorker(worker);
+}
+
+async function bootstrap() {
+  await Promise.all(browserWorkers.map(worker => launchBrowserForWorker(worker)));
+}
+
+function acquireWorkerSlot() {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
     const attempt = () => {
-      const slot = pool.find(entry => !entry.busy);
-      if (slot) {
-        slot.busy = true;
-        return resolve(slot);
+      if (Date.now() - startTime >= 5000) {
+        return reject(new Error('NO_AVAILABLE_WORKER'));
+      }
+      const worker = browserWorkers
+        .filter(entry => entry.active < CONTEXTS_PER_WORKER)
+        .sort((a, b) => a.active - b.active)[0];
+      if (worker) {
+        const slotId = worker.slots.findIndex(isBusy => !isBusy);
+        if (slotId !== -1) {
+          worker.slots[slotId] = true;
+          worker.active += 1;
+          return resolve({ worker, slotId });
+        }
       }
       setTimeout(attempt, 100);
     };
@@ -67,10 +106,50 @@ function acquireContext() {
   });
 }
 
-async function loginWithContext(entry, email, password) {
-  return logContextStorage.run({ email, contextId: entry.id }, async () => {
-    const context = entry.context;
-    const page = entry.page;
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new Error('INVALID_JSON'));
+      }
+    });
+    req.on('error', err => reject(err));
+  });
+}
+
+function releaseWorkerSlot(worker, slotId) {
+  if (slotId >= 0 && slotId < CONTEXTS_PER_WORKER) {
+    worker.slots[slotId] = false;
+    worker.slotContexts[slotId] = null;
+  }
+  worker.active = Math.max(0, worker.active - 1);
+}
+
+function withTimeout(promise, timeoutMs) {
+  let timeoutRef;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutRef = setTimeout(() => reject(new Error('LOGIN_TIMEOUT')), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutRef));
+}
+
+async function loginWithContext(worker, contextSlotId, email, password) {
+  return logContextStorage.run({ email, contextId: `${worker.id}-${contextSlotId}` }, async () => {
+    const browser = await ensureWorkerBrowser(worker);
+    let context = null;
+    let isTimedOut = false;
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    });
+    worker.slotContexts[contextSlotId] = context;
+    const page = await context.newPage();
     const startTime = Date.now();
     const timeout = parseInt(process.env.TIMEOUT_SECONDS || '40', 10) * 1000;
     const emailToUse = email || process.env.SRM_EMAIL;
@@ -92,12 +171,12 @@ async function loginWithContext(entry, email, password) {
       console.error(`⏱️  Step 1 duration: ${Date.now() - startTime}ms`);
       console.error('');
 
-      console.error('🔄 STEP 2: Using existing browser context...');
-      console.error(`⏱️  Step 2 duration: 0ms`);
+      console.error('🔄 STEP 2: Creating isolated browser context...');
+      console.error(`⏱️  Step 2 duration: ${Date.now() - startTime}ms`);
       console.error('');
 
-      console.error('🔄 STEP 3: Reusing existing page...');
-      console.error(`⏱️  Step 3 duration: 0ms`);
+      console.error('🔄 STEP 3: Creating isolated page...');
+      console.error(`⏱️  Step 3 duration: ${Date.now() - startTime}ms`);
       console.error('');
 
       console.error('🔄 STEP 4: Navigating to SRM Academia portal...');
@@ -123,11 +202,6 @@ async function loginWithContext(entry, email, password) {
       const step5Start = Date.now();
       const pageHTML = await page.content();
       console.error(`📄 Page HTML length: ${pageHTML.length} characters`);
-      console.error('💾 Saving HTML to signup.html...');
-      const fs = require('fs');
-      const path = require('path');
-      fs.writeFileSync(path.join(__dirname, '..', 'signup.html'), pageHTML);
-      console.error('✅ HTML saved to signup.html');
       console.error(`⏱️  Step 5 duration: ${Date.now() - step5Start}ms`);
       console.error('');
 
@@ -513,7 +587,18 @@ async function loginWithContext(entry, email, password) {
 
       return formattedCookies;
     } finally {
-      await resetPageForNextJob(page);
+      try {
+        isTimedOut = !context || worker.slotContexts[contextSlotId] === null;
+        if (context) {
+          await context.close();
+        }
+      } catch (closeErr) {
+        console.error('⚠️ Failed to close context:', closeErr.message);
+      } finally {
+        if (!isTimedOut) {
+          worker.slotContexts[contextSlotId] = null;
+        }
+      }
     }
   });
 }
@@ -837,32 +922,64 @@ async function resetPageForNextJob(page) {
 
 async function handleLogin(req, res) {
   try {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
-      try {
-        const { email, password } = JSON.parse(body);
-        await logContextStorage.run({ email }, async () => {
-          console.log(`Received login request for ${email}`);
-          const entry = await acquireContext();
-          console.log(`Assigned context-${entry.id} to ${email}`);
-          try {
-            const cookies = await loginWithContext(entry, email, password);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'success', cookies }));
-          } catch (err) {
-            console.error(`context-${entry.id} failure for ${email}: ${err.message}`);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'error', reason: err.message }));
-          } finally {
-            entry.busy = false;
+    try {
+      const { email, password } = await parseBody(req);
+      await logContextStorage.run({ email }, async () => {
+        console.log(`Received login request for ${email}`);
+        const { worker, slotId: contextSlotId } = await acquireWorkerSlot();
+        let isTimedOut = false;
+        console.log(`Assigned worker-${worker.id} ctx-${contextSlotId} to ${email}`);
+        try {
+          const loginPromise = loginWithContext(worker, contextSlotId, email, password);
+          let timeoutRef;
+          const timeoutPromise = new Promise((_, reject) => {
+            timeoutRef = setTimeout(async () => {
+              isTimedOut = true;
+              const activeContext = worker.slotContexts[contextSlotId];
+              if (activeContext) {
+                try {
+                  await activeContext.close();
+                } catch (closeErr) {
+                  console.error('⚠️ Failed to close timed out context:', closeErr.message);
+                } finally {
+                  worker.slotContexts[contextSlotId] = null;
+                }
+              }
+              reject(new Error('LOGIN_TIMEOUT'));
+            }, TASK_TIMEOUT_MS);
+          });
+          const cookies = await Promise.race([loginPromise, timeoutPromise]).finally(() => clearTimeout(timeoutRef));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'success', cookies }));
+        } catch (err) {
+          console.error(`worker-${worker.id} ctx-${contextSlotId} failure for ${email}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'error', reason: err.message }));
+        } finally {
+          releaseWorkerSlot(worker, contextSlotId);
+          worker.tasksHandled += 1;
+          if (worker.tasksHandled >= 50 && worker.active === 0 && worker.browser && worker.browser.isConnected()) {
+            try {
+              await worker.browser.close();
+              worker.browser = null;
+              worker.tasksHandled = 0;
+            } catch (closeErr) {
+              console.error(`worker-${worker.id} browser periodic restart failed:`, closeErr.message);
+            }
           }
-        });
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'error', reason: 'invalid payload' }));
-      }
-    });
+          if (!worker.browser || !worker.browser.isConnected()) {
+            try {
+              await launchBrowserForWorker(worker);
+            } catch (restartErr) {
+              console.error(`worker-${worker.id} browser restart failed:`, restartErr.message);
+            }
+          }
+        }
+      });
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'error', reason: 'invalid payload' }));
+    }
   } catch {
     res.writeHead(500);
     res.end();

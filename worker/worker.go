@@ -43,8 +43,8 @@ func NewWorker(db *storage.SupabaseClient) *Worker {
 func (w *Worker) Start() {
 	logger.Info("worker_start", "Starting background worker", nil)
 
-	// 5 login workers: claim login jobs from public.jobs and call processLoginRequest.
-	for i := 0; i < 5; i++ {
+	// 2 login workers: each delegates Playwright login execution to internal context slots.
+	for i := 0; i < 2; i++ {
 		workerID := i + 1
 		logger.Info("worker_start", "Login worker goroutine started", map[string]interface{}{
 			"log_type":  "login",
@@ -319,7 +319,7 @@ func (w *Worker) executeLoginWithCredentials(userID, email, password string) (bo
 		return false, &failureMsg
 	}
 
-	if runningCount >= 3 {
+	if runningCount >= 6 {
 		failureMsg := "Playwright limit reached"
 		logger.Warn("execute_login_with_credentials", failureMsg, map[string]interface{}{
 			"running_count": runningCount,
