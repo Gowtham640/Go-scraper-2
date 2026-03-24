@@ -73,6 +73,7 @@ type MarksAssessment struct {
 type MarksEntry struct {
 	CourseCode  string            `json:"courseCode"`
 	CourseTitle string            `json:"courseTitle"`
+	Credit      string            `json:"credit,omitempty"`
 	Assessments []MarksAssessment `json:"assessments"`
 	Total       *float64          `json:"total"`
 }

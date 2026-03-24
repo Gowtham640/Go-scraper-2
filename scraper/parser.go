@@ -2,12 +2,16 @@ package scraper
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 	"srm-academia-scraper/models"
 )
+
+// marksCreditCellPattern matches a lone credit value in the marks table middle column (e.g. "3", "4.5").
+var marksCreditCellPattern = regexp.MustCompile(`^\d+(\.\d+)?$`)
 
 // ExtractSanitizedHTML extracts and decodes the content passed to pageSanitizer.sanitize().
 func ExtractSanitizedHTML(html string) (string, error) {
@@ -209,9 +213,16 @@ func ParseMarks(html string) ([]models.MarksEntry, error) {
 			return
 		}
 
+		cell1 := strings.TrimSpace(cells.Eq(1).Text())
+		credit := ""
+		if marksCreditCellPattern.MatchString(cell1) {
+			credit = cell1
+		}
+
 		entry := models.MarksEntry{
 			CourseCode:  courseCode,
 			CourseTitle: findCourseTitle(titleLookup, courseCode),
+			Credit:      credit,
 			Assessments: extractAssessmentsFromCell(cells.Eq(2)),
 		}
 

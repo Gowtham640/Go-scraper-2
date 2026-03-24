@@ -18,6 +18,7 @@ type Config struct {
 	EncryptionKey         string
 	PasswordKey           []byte
 	Port                  string
+	AuthServicePort       string
 	URL                   string
 	CronSecret            string
 	CronIntervalMinutes   int // attendance cron tick; default 60
@@ -62,6 +63,7 @@ func LoadConfig() (*Config, error) {
 		EncryptionKey:       getEnv("ENCRYPTION_KEY", ""),
 		PasswordKey:         passwordKey,
 		Port:                getEnv("PORT", "8080"),
+		AuthServicePort:     getEnv("AUTH_SERVICE_PORT", "3001"),
 		URL:                 getEnv("URL", "http://localhost:3000"),
 		CronSecret:          getEnv("CRON_SECRET", ""),
 		CronIntervalMinutes: cronIntervalMinutes,
