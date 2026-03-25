@@ -240,6 +240,18 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 		return err
 	}
 
+	// Token upsert succeeded: mark the user as having a valid token.
+	// This is intentionally placed after the token write succeeds.
+	var userUpdateResult []map[string]interface{}
+	_, userUpdateErr := s.client.From("users").
+		Update(map[string]interface{}{"has_token": true}, "", "").
+		Eq("id", userID).
+		ExecuteTo(&userUpdateResult)
+	if userUpdateErr != nil {
+		logger.ErrorWithUser(email, "upsert_token", "Failed to set users.has_token=true after token upsert", userUpdateErr, nil)
+		return userUpdateErr
+	}
+
 	logger.InfoWithUser(email, "upsert_token", "Token upserted successfully", nil)
 	return nil
 }

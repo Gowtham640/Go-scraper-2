@@ -654,22 +654,13 @@ func (w *Worker) fetchCalendar(job *models.Job, tokenData *models.TokenData) (bo
 	// Clean and normalize
 	scraper.CleanCalendarData(calendarData)
 	normalizedCalendar := scraper.NormalizeCalendarData(calendarData)
-	calendarPayload := map[string]interface{}{
-		"today":    normalizedCalendar.Today,
-		"calendar": normalizedCalendar.Calendar,
-	}
+	// Store the normalized calendar JSON directly into public.calendar.data.
+	calendarPayload := normalizedCalendar
 
 	// Store in global calendar table
 	err = w.db.UpsertCalendar("Default", 0, calendarPayload)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Calendar storage failed: %v", err)
-		return false, &failureMsg
-	}
-
-	// Also cache per-user
-	err = w.db.UpsertUserCache(job.UserID, "calendar", calendarData, 24)
-	if err != nil {
-		failureMsg := fmt.Sprintf("User cache storage failed: %v", err)
 		return false, &failureMsg
 	}
 
