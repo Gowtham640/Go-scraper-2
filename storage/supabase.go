@@ -570,12 +570,46 @@ func (s *SupabaseClient) GetUserBatch(userID string) (string, error) {
 		return "", fmt.Errorf("user not found")
 	}
 
-	batch := result[0]["batch"].(string)
+	rawBatch, exists := result[0]["batch"]
+	if !exists || rawBatch == nil {
+		logger.Warn("get_user_batch", "Batch is missing or null for user", map[string]interface{}{
+			"user_id":   userID,
+			"batch_raw": rawBatch,
+		})
+		return "", fmt.Errorf("batch is null")
+	}
+
+	var batch string
+	switch value := rawBatch.(type) {
+	case string:
+		batch = strings.TrimSpace(value)
+	case float64:
+		batch = strings.TrimSpace(fmt.Sprintf("%.0f", value))
+	case int:
+		batch = strings.TrimSpace(fmt.Sprintf("%d", value))
+	default:
+		logger.Warn("get_user_batch", "Batch has unsupported type", map[string]interface{}{
+			"user_id":    userID,
+			"batch_type": fmt.Sprintf("%T", rawBatch),
+			"batch_raw":  rawBatch,
+		})
+		return "", fmt.Errorf("batch has unsupported type")
+	}
+
+	if batch == "" {
+		logger.Warn("get_user_batch", "Batch is empty after normalization", map[string]interface{}{
+			"user_id":    userID,
+			"batch_type": fmt.Sprintf("%T", rawBatch),
+			"batch_raw":  rawBatch,
+		})
+		return "", fmt.Errorf("batch is empty")
+	}
+
 	logger.Info("get_user_batch", "User batch found", map[string]interface{}{
 		"user_id":    userID,
 		"batch":      batch,
-		"batch_type": fmt.Sprintf("%T", result[0]["batch"]),
-		"batch_raw":  result[0]["batch"],
+		"batch_type": fmt.Sprintf("%T", rawBatch),
+		"batch_raw":  rawBatch,
 	})
 	return batch, nil
 }
