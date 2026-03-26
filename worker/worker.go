@@ -19,6 +19,7 @@ import (
 var globalExternalRequestLimiter = rate.NewLimiter(rate.Limit(10), 10)
 
 const allowedCalendarFetchEmail = "gr8790@srmist.edu.in"
+const captureDownloadedAttendanceHTML = false
 
 func waitGlobalExternalRequestSlot() {
 	// Background context: this is a worker, not tied to request lifecycle.
@@ -683,182 +684,15 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 	// Spread out attendance fetches to reduce portal load.
 	time.Sleep(750 * time.Millisecond)
 
-	// Apply rate limiting
-	logger.Info("fetch_attendance", "Applying rate limit before request", map[string]interface{}{
-		"job_id":  job.ID,
-		"user_id": job.UserID,
-		"delay":   "1 second",
-	})
-	scraper.RateLimit(1 * time.Second)
-
-	// Create HTTP client
-	logger.Info("fetch_attendance", "Creating HTTP client", map[string]interface{}{
-		"job_id":  job.ID,
-		"user_id": job.UserID,
-	})
-	httpClient := scraper.NewHTTPClient()
-
-	// Fetch HTML from attendance endpoint
-	logger.Info("fetch_attendance", "Making HTTP request to attendance endpoint", map[string]interface{}{
-		"job_id":      job.ID,
-		"user_id":     job.UserID,
-		"url":         scraper.AttendanceURL,
-		"has_cookies": tokenData != nil && tokenData.Tokens != "",
-	})
-	waitGlobalExternalRequestSlot()
-	htmlContent, err := httpClient.GetWithCookies(scraper.AttendanceURL, tokenData.Tokens)
-
-	// Check for authentication failure
-	if err != nil && w.isAuthFailure(err) {
-		logger.Warn("fetch_attendance", "Authentication failure detected, triggering login", map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-			"error":   err.Error(),
-		})
-
-		// Enqueue login job
-		jobReq := models.JobCreateRequest{
-			UserID:   job.UserID,
-			JobType:  "login",
-			DataType: "auth",
-			Priority: 50, // Token refresh
-		}
-		w.db.EnqueueJob(jobReq) // Ignore error
-
-		failureMsg := "Authentication failed - login job enqueued"
-		logger.Info("fetch_attendance", failureMsg, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-		})
+	decodedHTML, err := w.fetchAttendancePageHTML(job, tokenData, "fetch_attendance", true)
+	if err != nil {
+		failureMsg := err.Error()
 		return false, &failureMsg
 	}
-
-	// Check for general HTTP errors
-	if err != nil {
-		failureMsg := fmt.Sprintf("HTTP request failed: %v", err)
-		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-			"url":     scraper.AttendanceURL,
-		})
-		return false, &failureMsg
-	}
-
-	// Log successful fetch
-	logger.Info("fetch_attendance", "HTML content successfully fetched", map[string]interface{}{
-		"job_id":       job.ID,
-		"user_id":      job.UserID,
-		"content_size": len(htmlContent),
-		"url":          scraper.AttendanceURL,
-	})
-
-	// Save HTML content to attendance.html file
-	logger.Info("fetch_attendance", "Saving HTML content to attendance.html file", map[string]interface{}{
-		"job_id":  job.ID,
-		"user_id": job.UserID,
-		"file":    "attendance.html",
-	})
-	err = os.WriteFile("attendance.html", htmlContent, 0644)
-	if err != nil {
-		logger.Error("fetch_attendance", "Failed to save HTML to file", err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-			"file":    "attendance.html",
-		})
-		// Continue even if file save fails
-	} else {
-		logger.Info("fetch_attendance", "HTML content successfully saved to file", map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-			"file":    "attendance.html",
-			"bytes":   len(htmlContent),
-		})
-	}
-
-	rawHTML := string(htmlContent)
-	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
-	if err != nil {
-		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
-		isLoginLike, indicators := detectLoginLikePage(rawHTML)
-		if isLoginLike {
-			logger.Warn("fetch_attendance", "Detected login-like page instead of attendance data", map[string]interface{}{
-				"job_id":     job.ID,
-				"user_id":    job.UserID,
-				"final_url":  finalURL,
-				"indicators": indicators,
-				"snippet":    snippet(rawHTML),
-			})
-			w.enqueueAttendanceLogin(job.UserID)
-			failureMsg := "Login page detected while fetching attendance"
-			return false, &failureMsg
-		}
-
-		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v | page_url=%s", err, finalURL)
-		logger.Warn("fetch_attendance", "Final URL before failing attendance job", map[string]interface{}{
-			"job_id":    job.ID,
-			"user_id":   job.UserID,
-			"final_url": finalURL,
-		})
-		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
-			"job_id":   job.ID,
-			"user_id":  job.UserID,
-			"page_url": finalURL,
-		})
-		return false, &failureMsg
-	}
-
-	logger.Info("fetch_attendance", "Sanitized HTML extracted", map[string]interface{}{
-		"job_id":  job.ID,
-		"user_id": job.UserID,
-		"length":  len(decodedHTML),
-	})
-
-	attendanceEntries, err := scraper.ParseAttendance(decodedHTML)
-	if err != nil {
-		failureMsg := fmt.Sprintf("Failed to parse attendance data: %v", err)
-		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-		})
-		return false, &failureMsg
-	}
-
-	logger.Info("fetch_attendance", "Parsed attendance entries", map[string]interface{}{
-		"job_id":      job.ID,
-		"user_id":     job.UserID,
-		"entry_count": len(attendanceEntries),
-	})
 
 	fetchedAt := time.Now().UTC()
-	attendanceData := map[string]interface{}{
-		"entries":    attendanceEntries,
-		"url":        scraper.AttendanceURL,
-		"fetched_at": fetchedAt.Format(time.RFC3339),
-	}
-
-	// Store in database cache
-	logger.Info("fetch_attendance", "Storing attendance data in cache", map[string]interface{}{
-		"job_id":    job.ID,
-		"user_id":   job.UserID,
-		"cache_ttl": 2,
-		"data_type": "attendance",
-	})
-	if err = w.db.UpsertUserCache(job.UserID, "attendance", attendanceData, 2); err != nil {
-		failureMsg := fmt.Sprintf("Cache storage failed: %v", err)
-		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-		})
-		return false, &failureMsg
-	}
-
-	processor := newAttendanceProcessor(w.db)
-	if err := processor.Process(job.ID, job.UserID, attendanceEntries, fetchedAt); err != nil {
-		failureMsg := fmt.Sprintf("Attendance pipeline failed: %v", err)
-		logger.Error("fetch_attendance", failureMsg, err, map[string]interface{}{
-			"job_id":  job.ID,
-			"user_id": job.UserID,
-		})
+	if err := w.parseAndPersistAttendanceAndMarks(job, decodedHTML, fetchedAt, "fetch_attendance"); err != nil {
+		failureMsg := err.Error()
 		return false, &failureMsg
 	}
 
@@ -866,7 +700,7 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 		"job_id":        job.ID,
 		"user_id":       job.UserID,
 		"cached":        true,
-		"file_saved":    true,
+		"file_saved":    captureDownloadedAttendanceHTML,
 		"pipeline_done": true,
 	})
 
@@ -1141,7 +975,7 @@ func (w *Worker) fetchAttendancePageHTML(job *models.Job, tokenData *models.Toke
 		"url":          scraper.AttendanceURL,
 	})
 
-	if saveHTML {
+	if saveHTML && captureDownloadedAttendanceHTML {
 		logger.Info(logType, "Saving HTML content to attendance.html file", map[string]interface{}{
 			"job_id":  job.ID,
 			"user_id": job.UserID,

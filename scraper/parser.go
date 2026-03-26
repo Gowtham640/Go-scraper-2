@@ -13,6 +13,73 @@ import (
 // marksCreditCellPattern matches a lone credit value in the marks table middle column (e.g. "3", "4.5").
 var marksCreditCellPattern = regexp.MustCompile(`^\d+(\.\d+)?$`)
 
+func decodeJavaScriptEscapedString(raw string) (string, error) {
+	var out strings.Builder
+	out.Grow(len(raw))
+
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		if ch != '\\' {
+			out.WriteByte(ch)
+			continue
+		}
+
+		if i+1 >= len(raw) {
+			return "", fmt.Errorf("trailing backslash in sanitized html")
+		}
+
+		i++
+		esc := raw[i]
+		switch esc {
+		case 'n':
+			out.WriteByte('\n')
+		case 'r':
+			out.WriteByte('\r')
+		case 't':
+			out.WriteByte('\t')
+		case 'b':
+			out.WriteByte('\b')
+		case 'f':
+			out.WriteByte('\f')
+		case 'v':
+			out.WriteByte('\v')
+		case '\n', '\r':
+			// JavaScript line continuation: backslash + newline is removed.
+			if esc == '\r' && i+1 < len(raw) && raw[i+1] == '\n' {
+				i++
+			}
+		case 'x':
+			if i+2 >= len(raw) {
+				return "", fmt.Errorf("invalid \\x escape in sanitized html")
+			}
+			hex := raw[i+1 : i+3]
+			val, err := strconv.ParseUint(hex, 16, 8)
+			if err != nil {
+				return "", fmt.Errorf("invalid \\x escape %q: %w", hex, err)
+			}
+			out.WriteByte(byte(val))
+			i += 2
+		case 'u':
+			if i+4 >= len(raw) {
+				return "", fmt.Errorf("invalid \\u escape in sanitized html")
+			}
+			hex := raw[i+1 : i+5]
+			val, err := strconv.ParseUint(hex, 16, 16)
+			if err != nil {
+				return "", fmt.Errorf("invalid \\u escape %q: %w", hex, err)
+			}
+			out.WriteRune(rune(val))
+			i += 4
+		default:
+			// JavaScript allows identity escapes in many contexts (e.g. \/, \-, \').
+			// Keep the escaped character and drop the backslash.
+			out.WriteByte(esc)
+		}
+	}
+
+	return out.String(), nil
+}
+
 // ExtractSanitizedHTML extracts and decodes the content passed to pageSanitizer.sanitize().
 func ExtractSanitizedHTML(html string) (string, error) {
 	const marker = "pageSanitizer.sanitize('"
@@ -38,7 +105,7 @@ func ExtractSanitizedHTML(html string) (string, error) {
 		}
 		if ch == '\'' {
 			raw := builder.String()
-			decoded, err := strconv.Unquote(`"` + raw + `"`)
+			decoded, err := decodeJavaScriptEscapedString(raw)
 			if err != nil {
 				return "", fmt.Errorf("failed to decode sanitized html: %w", err)
 			}
