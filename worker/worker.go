@@ -87,12 +87,19 @@ func (w *Worker) Start() {
 					continue
 				}
 
+				requestedDataTypes := job.RequestedDataTypes
+				if len(requestedDataTypes) == 0 {
+					// Jobs are persisted in DB without RequestedDataTypes metadata.
+					// Fall back to core dashboard datasets so new users always get hydrated.
+					requestedDataTypes = []string{"attendance", "marks", "timetable"}
+				}
+
 				loginReq := models.WorkerLoginRequest{
 					UserID:             job.UserID,
 					Email:              email,
 					Password:           password,
 					Priority:           job.Priority,
-					RequestedDataTypes: []string{},
+					RequestedDataTypes: requestedDataTypes,
 				}
 
 				success, failureReason := w.processLoginRequest(loginReq)
