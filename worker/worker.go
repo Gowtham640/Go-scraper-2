@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"golang.org/x/time/rate"
 	"os"
+	"runtime/debug"
 	"srm-academia-scraper/auth"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
@@ -20,6 +21,23 @@ var globalExternalRequestLimiter = rate.NewLimiter(rate.Limit(10), 10)
 
 const allowedCalendarFetchEmail = "gr8790@srmist.edu.in"
 const captureDownloadedAttendanceHTML = false
+
+func runWorkerLoopSafely(loopName string, fn func()) {
+	for {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Error("worker_panic", "Recovered panic in worker loop", fmt.Errorf("%v", recovered), map[string]interface{}{
+						"loop":  loopName,
+						"stack": string(debug.Stack()),
+					})
+				}
+			}()
+			fn()
+		}()
+		time.Sleep(250 * time.Millisecond)
+	}
+}
 
 func waitGlobalExternalRequestSlot() {
 	// Background context: this is a worker, not tied to request lifecycle.
@@ -52,18 +70,18 @@ func (w *Worker) Start() {
 			"worker_id": workerID,
 		})
 		go func(id int) {
-			for {
+			runWorkerLoopSafely("login_worker_loop", func() {
 				job, err := w.db.ClaimNextLoginJob()
 				if err != nil {
 					logger.Error("login_worker", "Failed to claim login job", err, map[string]interface{}{
 						"worker_id": id,
 					})
 					time.Sleep(1 * time.Second)
-					continue
+					return
 				}
 				if job == nil {
 					time.Sleep(1 * time.Second)
-					continue
+					return
 				}
 
 				email, emailErr := w.db.GetUserEmail(job.UserID)
@@ -74,7 +92,7 @@ func (w *Worker) Start() {
 					})
 					failure := fmt.Sprintf("login job missing email: %v", emailErr)
 					_ = w.db.UpdateJobStatus(job.ID, "failed", &failure)
-					continue
+					return
 				}
 
 				password, passwordErr := w.db.GetUserDecryptedPassword(job.UserID)
@@ -85,7 +103,7 @@ func (w *Worker) Start() {
 					})
 					failure := fmt.Sprintf("login job missing password: %v", passwordErr)
 					_ = w.db.UpdateJobStatus(job.ID, "failed", &failure)
-					continue
+					return
 				}
 
 				requestedDataTypes := job.RequestedDataTypes
@@ -116,7 +134,7 @@ func (w *Worker) Start() {
 						"status":    newStatus,
 					})
 				}
-			}
+			})
 		}(workerID)
 	}
 
@@ -128,10 +146,10 @@ func (w *Worker) Start() {
 			"worker_id": workerID,
 		})
 		go func() {
-			for {
+			runWorkerLoopSafely("fetch_worker_loop", func() {
 				w.processNextJob()
 				time.Sleep(1 * time.Second) // Prevent tight loop
-			}
+			})
 		}()
 	}
 
@@ -143,10 +161,10 @@ func (w *Worker) Start() {
 			"worker_id": workerID,
 		})
 		go func() {
-			for {
+			runWorkerLoopSafely("attendance_worker_loop", func() {
 				w.processNextAttendanceJob()
 				time.Sleep(2 * time.Second) // keep scheduling intervals
-			}
+			})
 		}()
 	}
 
