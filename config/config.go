@@ -23,6 +23,7 @@ type Config struct {
 	CronSecret            string
 	CronIntervalMinutes   int // attendance cron tick; default 60
 	CronBatchSize         int // max users to enqueue per tick; 0 = all users
+	SaveDownloadedAttendanceHTML bool // when true, raw attendance payload is written to attendance.html
 }
 
 var AppConfig *Config
@@ -68,6 +69,7 @@ func LoadConfig() (*Config, error) {
 		CronSecret:          getEnv("CRON_SECRET", ""),
 		CronIntervalMinutes: cronIntervalMinutes,
 		CronBatchSize:       cronBatchSize,
+		SaveDownloadedAttendanceHTML: getEnvBool("SAVE_DOWNLOADED_ATTENDANCE_HTML", false),
 	}
 
 	// Validate required fields
@@ -92,4 +94,18 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("Warning: invalid %s %q, using default %t", key, value, defaultValue)
+		return defaultValue
+	}
+	return parsed
 }
