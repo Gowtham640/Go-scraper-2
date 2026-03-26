@@ -285,17 +285,23 @@ func (w *Worker) processLoginRequest(req models.WorkerLoginRequest) (bool, *stri
 		"email":   req.Email,
 	})
 
+	requestedDataTypes := req.RequestedDataTypes
+	if len(requestedDataTypes) == 0 {
+		// Defensive fallback: DB-backed login jobs do not persist requested data types.
+		requestedDataTypes = []string{"attendance", "marks", "timetable"}
+	}
+
 	// Execute login
 	success, failureReason := w.executeLoginWithCredentials(req.UserID, req.Email, req.Password)
 
 	if success {
 		logger.Info("process_login_request", "Login successful, enqueuing requested fetch jobs", map[string]interface{}{
 			"user_id":              req.UserID,
-			"requested_data_types": req.RequestedDataTypes,
+			"requested_data_types": requestedDataTypes,
 		})
 
 		// Enqueue only the requested fetch jobs after successful login
-		err := w.db.EnqueueSpecificFetchJobs(req.UserID, req.RequestedDataTypes)
+		err := w.db.EnqueueSpecificFetchJobs(req.UserID, requestedDataTypes)
 		if err != nil {
 			logger.Error("process_login_request", "Failed to enqueue requested jobs", err, map[string]interface{}{
 				"user_id": req.UserID,
@@ -785,6 +791,15 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 	rawHTML := string(htmlContent)
 	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
+		logger.Warn("fetch_attendance", "Sanitized extraction failed, falling back to decoded raw HTML", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"error":   err.Error(),
+		})
+		decodedHTML = scraper.DecodeHTMLEntities(rawHTML)
+	}
+
+	if decodedHTML == "" {
 		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
 		isLoginLike, indicators := detectLoginLikePage(rawHTML)
 		if isLoginLike {
@@ -800,7 +815,7 @@ func (w *Worker) fetchAttendance(job *models.Job, tokenData *models.TokenData) (
 			return false, &failureMsg
 		}
 
-		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v | page_url=%s", err, finalURL)
+		failureMsg := fmt.Sprintf("Failed to extract attendance HTML | page_url=%s", finalURL)
 		logger.Warn("fetch_attendance", "Final URL before failing attendance job", map[string]interface{}{
 			"job_id":    job.ID,
 			"user_id":   job.UserID,
@@ -1054,6 +1069,15 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 	rawHTML := string(htmlContent)
 	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
+		logger.Warn("fetch_marks", "Sanitized extraction failed, falling back to decoded raw HTML", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"error":   err.Error(),
+		})
+		decodedHTML = scraper.DecodeHTMLEntities(rawHTML)
+	}
+
+	if decodedHTML == "" {
 		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
 		isLoginLike, indicators := detectLoginLikePage(rawHTML)
 		if isLoginLike {
@@ -1069,7 +1093,7 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 			return false, &failureMsg
 		}
 
-		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v | page_url=%s", err, finalURL)
+		failureMsg := fmt.Sprintf("Failed to extract marks HTML | page_url=%s", finalURL)
 		logger.Warn("fetch_marks", "Final URL before failing marks job", map[string]interface{}{
 			"job_id":    job.ID,
 			"user_id":   job.UserID,
@@ -1174,6 +1198,15 @@ func (w *Worker) fetchAttendancePageHTML(job *models.Job, tokenData *models.Toke
 	rawHTML := string(htmlContent)
 	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
+		logger.Warn(logType, "Sanitized extraction failed, falling back to decoded raw HTML", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"error":   err.Error(),
+		})
+		decodedHTML = scraper.DecodeHTMLEntities(rawHTML)
+	}
+
+	if decodedHTML == "" {
 		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
 		isLoginLike, indicators := detectLoginLikePage(rawHTML)
 		if isLoginLike {
@@ -1188,7 +1221,7 @@ func (w *Worker) fetchAttendancePageHTML(job *models.Job, tokenData *models.Toke
 			return "", fmt.Errorf("login page detected while fetching attendance data")
 		}
 
-		failureMsg := fmt.Sprintf("Failed to extract sanitized HTML: %v | page_url=%s", err, finalURL)
+		failureMsg := fmt.Sprintf("Failed to extract attendance/marks HTML | page_url=%s", finalURL)
 		logger.Warn(logType, "Final URL before failing job", map[string]interface{}{
 			"job_id":    job.ID,
 			"user_id":   job.UserID,
