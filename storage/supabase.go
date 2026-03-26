@@ -7,6 +7,7 @@ import (
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/passcrypt"
+	"strings"
 	"time"
 
 	"github.com/supabase-community/gotrue-go/types"
@@ -939,7 +940,13 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 	}
 
 	jobData := jobsResult[0]
-	jobID := jobData["id"].(string)
+	jobID, err := requireStringField(jobData, "id")
+	if err != nil {
+		logger.Error("claim_next_job", "Invalid job row: missing id", err, map[string]interface{}{
+			"row": jobData,
+		})
+		return nil, err
+	}
 
 	// Atomically claim the job
 	now := time.Now().Format(time.RFC3339)
@@ -969,14 +976,55 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 	}
 
 	// Parse the claimed job
+	userID, err := requireStringField(jobData, "user_id")
+	if err != nil {
+		logger.Error("claim_next_job", "Invalid job row: missing user_id", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	jobType, err := requireStringField(jobData, "job_type")
+	if err != nil {
+		logger.Error("claim_next_job", "Invalid job row: missing job_type", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	dataType, err := requireStringField(jobData, "data_type")
+	if err != nil {
+		logger.Error("claim_next_job", "Invalid job row: missing data_type", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	priority, err := requireIntField(jobData, "priority")
+	if err != nil {
+		logger.Error("claim_next_job", "Invalid job row: invalid priority", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	retryCount, err := requireIntField(jobData, "retry_count")
+	if err != nil {
+		logger.Error("claim_next_job", "Invalid job row: invalid retry_count", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+
 	job := &models.Job{
 		ID:         jobID,
-		UserID:     jobData["user_id"].(string),
-		JobType:    jobData["job_type"].(string),
-		DataType:   jobData["data_type"].(string),
+		UserID:     userID,
+		JobType:    jobType,
+		DataType:   dataType,
 		Status:     "running",
-		Priority:   int(jobData["priority"].(float64)),
-		RetryCount: int(jobData["retry_count"].(float64)),
+		Priority:   priority,
+		RetryCount: retryCount,
 	}
 
 	if createdAtStr, ok := jobData["created_at"].(string); ok {
@@ -1032,7 +1080,13 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 	}
 
 	jobData := jobsResult[0]
-	jobID := jobData["id"].(string)
+	jobID, err := requireStringField(jobData, "id")
+	if err != nil {
+		logger.Error("claim_attendance_job", "Invalid attendance job row: missing id", err, map[string]interface{}{
+			"row": jobData,
+		})
+		return nil, err
+	}
 
 	now := time.Now().Format(time.RFC3339)
 	updateData := map[string]interface{}{
@@ -1059,14 +1113,55 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 		return nil, nil
 	}
 
+	userID, err := requireStringField(jobData, "user_id")
+	if err != nil {
+		logger.Error("claim_attendance_job", "Invalid attendance job row: missing user_id", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	jobType, err := requireStringField(jobData, "job_type")
+	if err != nil {
+		logger.Error("claim_attendance_job", "Invalid attendance job row: missing job_type", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	dataType, err := requireStringField(jobData, "data_type")
+	if err != nil {
+		logger.Error("claim_attendance_job", "Invalid attendance job row: missing data_type", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	priority, err := requireIntField(jobData, "priority")
+	if err != nil {
+		logger.Error("claim_attendance_job", "Invalid attendance job row: invalid priority", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	retryCount, err := requireIntField(jobData, "retry_count")
+	if err != nil {
+		logger.Error("claim_attendance_job", "Invalid attendance job row: invalid retry_count", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+
 	job := &models.Job{
 		ID:         jobID,
-		UserID:     jobData["user_id"].(string),
-		JobType:    jobData["job_type"].(string),
-		DataType:   jobData["data_type"].(string),
+		UserID:     userID,
+		JobType:    jobType,
+		DataType:   dataType,
 		Status:     "running",
-		Priority:   int(jobData["priority"].(float64)),
-		RetryCount: int(jobData["retry_count"].(float64)),
+		Priority:   priority,
+		RetryCount: retryCount,
 	}
 
 	if createdAtStr, ok := jobData["created_at"].(string); ok {
@@ -1116,7 +1211,13 @@ func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
 	}
 
 	jobData := jobsResult[0]
-	jobID := jobData["id"].(string)
+	jobID, err := requireStringField(jobData, "id")
+	if err != nil {
+		logger.Error("claim_next_login_job", "Invalid login job row: missing id", err, map[string]interface{}{
+			"row": jobData,
+		})
+		return nil, err
+	}
 
 	// Atomically claim the job.
 	now := time.Now().Format(time.RFC3339)
@@ -1142,14 +1243,55 @@ func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
 		return nil, nil
 	}
 
+	userID, err := requireStringField(jobData, "user_id")
+	if err != nil {
+		logger.Error("claim_next_login_job", "Invalid login job row: missing user_id", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	jobType, err := requireStringField(jobData, "job_type")
+	if err != nil {
+		logger.Error("claim_next_login_job", "Invalid login job row: missing job_type", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	dataType, err := requireStringField(jobData, "data_type")
+	if err != nil {
+		logger.Error("claim_next_login_job", "Invalid login job row: missing data_type", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	priority, err := requireIntField(jobData, "priority")
+	if err != nil {
+		logger.Error("claim_next_login_job", "Invalid login job row: invalid priority", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+	retryCount, err := requireIntField(jobData, "retry_count")
+	if err != nil {
+		logger.Error("claim_next_login_job", "Invalid login job row: invalid retry_count", err, map[string]interface{}{
+			"job_id": jobID,
+			"row":    jobData,
+		})
+		return nil, err
+	}
+
 	job := &models.Job{
 		ID:         jobID,
-		UserID:     jobData["user_id"].(string),
-		JobType:    jobData["job_type"].(string),
-		DataType:   jobData["data_type"].(string),
+		UserID:     userID,
+		JobType:    jobType,
+		DataType:   dataType,
 		Status:     "running",
-		Priority:   int(jobData["priority"].(float64)),
-		RetryCount: int(jobData["retry_count"].(float64)),
+		Priority:   priority,
+		RetryCount: retryCount,
 	}
 
 	if createdAtStr, ok := jobData["created_at"].(string); ok {
@@ -1288,4 +1430,28 @@ func (s *SupabaseClient) EnqueueSpecificFetchJobs(userID string, requestedDataTy
 // EnqueueDependentFetchJobs creates fetch jobs after successful login (deprecated - use EnqueueSpecificFetchJobs)
 func (s *SupabaseClient) EnqueueDependentFetchJobs(userID string) error {
 	return s.EnqueueSpecificFetchJobs(userID, []string{"courses", "timetable", "calendar", "user"})
+}
+
+func requireStringField(row map[string]interface{}, key string) (string, error) {
+	value, ok := row[key]
+	if !ok || value == nil {
+		return "", fmt.Errorf("field %s is missing or nil", key)
+	}
+	str, ok := value.(string)
+	if !ok || strings.TrimSpace(str) == "" {
+		return "", fmt.Errorf("field %s is not a non-empty string", key)
+	}
+	return str, nil
+}
+
+func requireIntField(row map[string]interface{}, key string) (int, error) {
+	value, ok := row[key]
+	if !ok || value == nil {
+		return 0, fmt.Errorf("field %s is missing or nil", key)
+	}
+	number, ok := value.(float64)
+	if !ok {
+		return 0, fmt.Errorf("field %s is not numeric", key)
+	}
+	return int(number), nil
 }
