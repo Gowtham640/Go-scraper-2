@@ -21,6 +21,7 @@ var globalExternalRequestLimiter = rate.NewLimiter(rate.Limit(10), 10)
 
 const allowedCalendarFetchEmail = "gr8790@srmist.edu.in"
 const captureDownloadedAttendanceHTML = false
+const captureDownloadedTimetableHTML = true
 
 func runWorkerLoopSafely(loopName string, fn func()) {
 	for {
@@ -545,6 +546,32 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 		"job_id":  job.ID,
 		"user_id": job.UserID,
 	})
+
+	if captureDownloadedTimetableHTML {
+		scraper.RateLimit(1 * time.Second)
+		httpClient := scraper.NewHTTPClient()
+		waitGlobalExternalRequestSlot()
+		htmlContent, err := httpClient.GetWithCookies(scraper.TimeTableURL, tokenData.Tokens)
+		if err != nil {
+			logger.Warn("fetch_timetable", "Failed to capture timetable HTML to tt.html", map[string]interface{}{
+				"job_id":  job.ID,
+				"user_id": job.UserID,
+				"error":   err.Error(),
+			})
+		} else if writeErr := os.WriteFile("tt.html", htmlContent, 0644); writeErr != nil {
+			logger.Warn("fetch_timetable", "Failed to write tt.html", map[string]interface{}{
+				"job_id":  job.ID,
+				"user_id": job.UserID,
+				"error":   writeErr.Error(),
+			})
+		} else {
+			logger.Info("fetch_timetable", "Saved downloaded timetable payload to tt.html", map[string]interface{}{
+				"job_id":  job.ID,
+				"user_id": job.UserID,
+				"bytes":   len(htmlContent),
+			})
+		}
+	}
 
 	// First ensure we have user data to get batch
 	userBatch, err := w.db.GetUserBatch(job.UserID)
