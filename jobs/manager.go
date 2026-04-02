@@ -1,7 +1,7 @@
 package jobs
 
 import (
-	"srm-academia-scraper/logger"
+	"errors"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/storage"
 	"srm-academia-scraper/worker"
@@ -44,16 +44,13 @@ func (m *Manager) GetUserCache(userID, dataType string) (interface{}, error) {
 
 // EnqueueJob handles job creation and coordinates with worker for login jobs
 func (m *Manager) EnqueueJob(req models.JobCreateRequest) error {
-	logger.Info("job_manager_enqueue", "Enqueueing job", map[string]interface{}{
-		"user_id":   req.UserID,
-		"job_type":  req.JobType,
-		"data_type": req.DataType,
-	})
-
 	// Use the database method that returns appropriate objects
 	job, _, err := m.db.EnqueueJob(req)
 	if err != nil {
 		if err.Error() == "queue_full" {
+			return err
+		}
+		if errors.Is(err, storage.ErrLoginRateLimited) {
 			return err
 		}
 		if err.Error() == "job already exists" {

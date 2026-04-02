@@ -1,4 +1,4 @@
-package auth
+package cookiecheck
 
 import "strings"
 
@@ -12,19 +12,18 @@ var criticalCookieRequirements = []cookieRequirement{
 	{
 		name: "iamcsr",
 		matcher: func(name string) bool {
-			return name == "iamcsr"
+			return strings.EqualFold(name, "iamcsr")
 		},
 	},
 	{
 		name: "wms-tkp-token",
 		matcher: func(name string) bool {
-			return strings.HasPrefix(name, "wms-tkp-token")
+			return strings.HasPrefix(strings.ToLower(name), "wms-tkp-token")
 		},
 	},
 }
 
-// GetMissingCriticalCookies returns a list of required cookie names that are not
-// present in the provided cookie header string.
+// GetMissingCriticalCookies returns required cookie names that are not present in the cookie header string.
 func GetMissingCriticalCookies(cookieHeader string) []string {
 	if strings.TrimSpace(cookieHeader) == "" {
 		missing := make([]string, len(criticalCookieRequirements))
@@ -53,7 +52,7 @@ func GetMissingCriticalCookies(cookieHeader string) []string {
 	return missing
 }
 
-// parseCookieNames extracts the cookie names from a cookie header string.
+// parseCookieNames extracts cookie names from a cookie header string.
 func parseCookieNames(header string) []string {
 	var names []string
 	for _, part := range strings.Split(header, ";") {

@@ -44,22 +44,10 @@ func NewHTTPClient() *HTTPClient {
 // SetCookies sets the session cookies for authenticated requests
 func (c *HTTPClient) SetCookies(cookies string) {
 	c.cookies = cookies
-	logger.Info("http_client", "Cookies set on HTTP client", map[string]interface{}{
-		"cookie_length": len(cookies),
-		"has_cookies": cookies != "",
-		"cookie_preview": func() string {
-			if len(cookies) > 100 {
-				return cookies[:100] + "..."
-			}
-			return cookies
-		}(),
-	})
 }
 
 // MakeRequest makes an HTTP request with SRM-specific headers
 func (c *HTTPClient) MakeRequest(method, url string, body io.Reader) ([]byte, error) {
-	logger.Info("http_request", fmt.Sprintf("Making %s request to %s", method, url), nil)
-
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		logger.Error("http_request", "Failed to create request", err, nil)
@@ -83,17 +71,9 @@ func (c *HTTPClient) MakeRequest(method, url string, body io.Reader) ([]byte, er
 	req.Header.Set("dnt", "1")
 	req.Header.Set("Referer", "https://academia.srmist.edu.in/")
 
-	// Add cookies if available
+	// Add cookies if available (never log raw Cookie header: contains session values).
 	if c.cookies != "" {
 		req.Header.Set("Cookie", c.cookies)
-		logger.Info("http_request", "Cookies being sent with request", map[string]interface{}{
-			"cookie_header": c.cookies,
-			"has_cookies": true,
-		})
-	} else {
-		logger.Info("http_request", "No cookies being sent with request", map[string]interface{}{
-			"has_cookies": false,
-		})
 	}
 
 	// Read request body if present
@@ -124,22 +104,20 @@ func (c *HTTPClient) MakeRequest(method, url string, body io.Reader) ([]byte, er
 		logger.Error("http_request", fmt.Sprintf("Request failed with status %d", resp.StatusCode), nil, map[string]interface{}{
 			"status_code": resp.StatusCode,
 			"url":         url,
+			"body_length": len(bodyBytes),
 		})
 		return nil, fmt.Errorf("request failed with status %d", resp.StatusCode)
 	}
 
-	logger.Info("http_request", "Request completed successfully", map[string]interface{}{
-		"status_code": resp.StatusCode,
-		"body_length": len(bodyBytes),
-	})
 	return bodyBytes, nil
 }
 
 // GetWithCookies makes a GET request with session cookies
 func (c *HTTPClient) GetWithCookies(url, cookies string) ([]byte, error) {
-	logger.Info("http_request", "Making GET request with cookies", map[string]interface{}{
-		"url": url,
-		"cookie_count": strings.Count(cookies, ";") + 1,
+	logger.Info("http_request", "GET", map[string]interface{}{
+		"url":         url,
+		"cookie_len":  len(cookies),
+		"has_cookies": cookies != "",
 	})
 	c.SetCookies(cookies)
 	return c.MakeRequest("GET", url, nil)
@@ -147,9 +125,10 @@ func (c *HTTPClient) GetWithCookies(url, cookies string) ([]byte, error) {
 
 // PostWithCookies makes a POST request with session cookies
 func (c *HTTPClient) PostWithCookies(url, cookies string, body io.Reader) ([]byte, error) {
-	logger.Info("http_request", "Making POST request with cookies", map[string]interface{}{
-		"url": url,
-		"cookie_count": strings.Count(cookies, ";") + 1,
+	logger.Info("http_request", "POST", map[string]interface{}{
+		"url":         url,
+		"cookie_len":  len(cookies),
+		"has_cookies": cookies != "",
 	})
 	c.SetCookies(cookies)
 	return c.MakeRequest("POST", url, body)

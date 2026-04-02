@@ -34,7 +34,26 @@ globalThis.console = proxiedConsole;
 const PORT = process.env.AUTH_SERVICE_PORT || 3001;
 const WORKER_COUNT = 2;
 const CONTEXTS_PER_WORKER = 3;
-const TASK_TIMEOUT_MS = parseInt(process.env.TIMEOUT_SECONDS || '40', 10) * 1000;
+// Wall-clock budget for the whole login (HTTP handler rejects after this; does not force-close context).
+const TASK_TIMEOUT_MS = 60000;
+
+function assertPageOpen(page) {
+  if (page.isClosed()) {
+    throw new Error('Page closed unexpectedly');
+  }
+}
+
+function formatCookiesForResponse(cookies) {
+  return cookies.map(cookie => ({
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    httpOnly: cookie.httpOnly,
+    secure: cookie.secure,
+    expiry: cookie.expires
+  }));
+}
 
 const browserWorkers = Array.from({ length: WORKER_COUNT }, (_, index) => ({
   id: index,
@@ -151,7 +170,7 @@ async function loginWithContext(worker, contextSlotId, email, password) {
     worker.slotContexts[contextSlotId] = context;
     const page = await context.newPage();
     const startTime = Date.now();
-    const timeout = parseInt(process.env.TIMEOUT_SECONDS || '40', 10) * 1000;
+    const timeout = TASK_TIMEOUT_MS;
     const emailToUse = email || process.env.SRM_EMAIL;
     const passwordToUse = password || process.env.SRM_PASSWORD;
     try {
@@ -159,6 +178,7 @@ async function loginWithContext(worker, contextSlotId, email, password) {
       console.error('🔄 STEP 1: Reading environment variables...');
       console.error(`📧 Email configured: ${emailToUse ? 'YES' : 'NO'}`);
       console.error(`🔑 Password configured: ${passwordToUse ? 'YES' : 'NO'}`);
+      console.error(`⏱️  Raw TIMEOUT_SECONDS: ${String(process.env.TIMEOUT_SECONDS ?? '(unset)')}`);
       console.error(`⏱️  Overall timeout: ${timeout / 1000} seconds`);
 
       if (!emailToUse || !passwordToUse) {
@@ -181,10 +201,11 @@ async function loginWithContext(worker, contextSlotId, email, password) {
 
       console.error('🔄 STEP 4: Navigating to SRM Academia portal...');
       console.error('🌐 URL: https://academia.srmist.edu.in/');
-      console.error('⏳ Wait condition: networkidle');
+      console.error('⏳ Wait condition: domcontentloaded');
+      assertPageOpen(page);
       const step4Start = Date.now();
       await page.goto('https://academia.srmist.edu.in/', {
-        waitUntil: 'networkidle',
+        waitUntil: 'domcontentloaded',
         timeout
       });
       console.error('✅ Page navigation completed');
@@ -199,6 +220,7 @@ async function loginWithContext(worker, contextSlotId, email, password) {
       console.error('');
 
       console.error('🔄 STEP 5: Capturing page HTML for analysis...');
+      assertPageOpen(page);
       const step5Start = Date.now();
       const pageHTML = await page.content();
       console.error(`📄 Page HTML length: ${pageHTML.length} characters`);
@@ -280,6 +302,19 @@ async function loginWithContext(worker, contextSlotId, email, password) {
       console.error(`⏱️  Step 13 duration: ${Date.now() - step13Start}ms`);
       console.error('');
 
+      // Early success: already on dashboard after sign-in (skip long step 14 / stabilizer when possible).
+      assertPageOpen(page);
+      await page.waitForTimeout(1200);
+      assertPageOpen(page);
+      const earlyUrlAfterSignIn = page.url();
+      if (earlyUrlAfterSignIn.includes('academia.srmist.edu.in') && isDashboardUrl(earlyUrlAfterSignIn)) {
+        console.log('Early login success detected');
+        let earlyCookies = await context.cookies();
+        earlyCookies = await retryCookieExtraction(context, page, earlyCookies);
+        console.error(`⏱️  TOTAL DURATION: ${Date.now() - startTime}ms`);
+        return formatCookiesForResponse(earlyCookies);
+      }
+
       console.error('🔄 STEP 14: Waiting for login result...');
       const stepCookiesStart = Date.now();
 
@@ -350,8 +385,8 @@ async function loginWithContext(worker, contextSlotId, email, password) {
           console.error('🔄 SESSION LIMIT: On session limit page, terminating other sessions...');
           const sessionLimitStart = Date.now();
           console.error('🔍 Looking for "Terminate all other sessions" button...');
-          await page.waitForLoadState('networkidle', { timeout: 10000 });
-          await page.waitForTimeout(3000);
+          await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+          await page.waitForTimeout(2000);
 
           try {
             console.error('🔍 URL before button click:', page.url());
@@ -478,8 +513,8 @@ async function loginWithContext(worker, contextSlotId, email, password) {
           console.error('🔄 SESSION LIMIT: On sessions reminder page, skipping for now...');
           const sessionLimitStart = Date.now();
           console.error('🔍 Looking for "Skip for now" link...');
-          await page.waitForLoadState('networkidle', { timeout: 10000 });
-          await page.waitForTimeout(3000);
+          await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+          await page.waitForTimeout(2000);
 
           try {
             console.error('🔍 URL before link click:', page.url());
@@ -532,6 +567,7 @@ async function loginWithContext(worker, contextSlotId, email, password) {
   }
 
   console.error('');
+  assertPageOpen(page);
   await stabilizeNavigation(page);
   const currentUrl = await ensureDashboardUrl(page);
       const currentHash = await page.evaluate(() => window.location.hash).catch(() => '');
@@ -570,15 +606,7 @@ async function loginWithContext(worker, contextSlotId, email, password) {
         console.error(`❌ Missing essential cookies: ${missingEssential.join(', ')}`);
       }
 
-      const formattedCookies = cookies.map(cookie => ({
-        name: cookie.name,
-        value: cookie.value,
-        domain: cookie.domain,
-        path: cookie.path,
-        httpOnly: cookie.httpOnly,
-        secure: cookie.secure,
-        expiry: cookie.expires
-      }));
+      const formattedCookies = formatCookiesForResponse(cookies);
 
       console.error(`⏱️  Step 16 duration: ${Date.now() - cookieExtractStart}ms`);
       console.error('');
@@ -721,15 +749,15 @@ async function stabilizeNavigation(page, maxCycles = 5, waitMs = 1000) {
       }
     
       console.error('⚠️ Portal reached but cookies not ready, waiting...');
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
       continue;
     }
 
     if (state.state === 'unknown') {
       console.error('⚠️ Unknown state, waiting for stabilization...');
       await Promise.race([
-        page.waitForLoadState('networkidle'),
-        page.waitForTimeout(1500)
+        page.waitForLoadState('domcontentloaded'),
+        page.waitForTimeout(1000)
       ]);
       continue;
     }
@@ -933,18 +961,9 @@ async function handleLogin(req, res) {
           const loginPromise = loginWithContext(worker, contextSlotId, email, password);
           let timeoutRef;
           const timeoutPromise = new Promise((_, reject) => {
-            timeoutRef = setTimeout(async () => {
+            timeoutRef = setTimeout(() => {
               isTimedOut = true;
-              const activeContext = worker.slotContexts[contextSlotId];
-              if (activeContext) {
-                try {
-                  await activeContext.close();
-                } catch (closeErr) {
-                  console.error('⚠️ Failed to close timed out context:', closeErr.message);
-                } finally {
-                  worker.slotContexts[contextSlotId] = null;
-                }
-              }
+              console.warn('LOGIN TIMEOUT reached - returning failure without force closing context');
               reject(new Error('LOGIN_TIMEOUT'));
             }, TASK_TIMEOUT_MS);
           });
@@ -988,6 +1007,7 @@ async function handleLogin(req, res) {
 
 async function startServer() {
   await bootstrap();
+  console.log(`Login task timeout: task_timeout_ms=${TASK_TIMEOUT_MS}`);
   const server = http.createServer((req, res) => {
     // Lightweight probe for Go /health and start-stack.ps1 wait loops
     if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {

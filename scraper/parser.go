@@ -80,41 +80,50 @@ func decodeJavaScriptEscapedString(raw string) (string, error) {
 	return out.String(), nil
 }
 
-// ExtractSanitizedHTML extracts and decodes the content passed to pageSanitizer.sanitize().
+// ExtractSanitizedHTML extracts and decodes the content passed to pageSanitizer.sanitize('...') or sanitize("...").
+// It applies full JavaScript string unescaping (\\n, \\/, \\xNN, \\uNNNN, etc.). Relying on \\x-only decoding
+// leaves <\\/style> intact, so the HTML parser never closes <style> and tables are invisible to goquery.
 func ExtractSanitizedHTML(html string) (string, error) {
-	const marker = "pageSanitizer.sanitize('"
-	idx := strings.Index(html, marker)
-	if idx == -1 {
-		return "", fmt.Errorf("pageSanitizer.sanitize() call not found")
-	}
+	var lastErr error
+	for _, quote := range []byte{'\'', '"'} {
+		marker := "pageSanitizer.sanitize(" + string(quote)
+		idx := strings.Index(html, marker)
+		if idx == -1 {
+			lastErr = fmt.Errorf("pageSanitizer.sanitize() call not found")
+			continue
+		}
 
-	idx += len(marker)
-	var builder strings.Builder
-	escaped := false
-	for i := idx; i < len(html); i++ {
-		ch := html[i]
-		if escaped {
-			builder.WriteByte(ch)
-			escaped = false
-			continue
-		}
-		if ch == '\\' {
-			builder.WriteByte('\\')
-			escaped = true
-			continue
-		}
-		if ch == '\'' {
-			raw := builder.String()
-			decoded, err := decodeJavaScriptEscapedString(raw)
-			if err != nil {
-				return "", fmt.Errorf("failed to decode sanitized html: %w", err)
+		idx += len(marker)
+		var builder strings.Builder
+		escaped := false
+		for i := idx; i < len(html); i++ {
+			ch := html[i]
+			if escaped {
+				builder.WriteByte(ch)
+				escaped = false
+				continue
 			}
-			return decoded, nil
+			if ch == '\\' {
+				builder.WriteByte('\\')
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				raw := builder.String()
+				decoded, err := decodeJavaScriptEscapedString(raw)
+				if err != nil {
+					return "", fmt.Errorf("failed to decode sanitized html: %w", err)
+				}
+				return decoded, nil
+			}
+			builder.WriteByte(ch)
 		}
-		builder.WriteByte(ch)
+		lastErr = fmt.Errorf("closing quote for pageSanitizer.sanitize() not found")
 	}
-
-	return "", fmt.Errorf("closing quote for pageSanitizer.sanitize() not found")
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("pageSanitizer.sanitize() call not found")
 }
 
 // ParseAttendance returns attendance entries from provided HTML.
