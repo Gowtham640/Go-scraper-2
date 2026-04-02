@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
-	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -52,14 +51,13 @@ func unescapeJavaScriptString(jsString string) (string, error) {
 		"input_length": len(jsString),
 	})
 
-	// Use Go's strconv.Unquote to properly unescape JavaScript string literals
-	// Add surrounding quotes to make it a valid Go string literal
-	quotedString := `"` + jsString + `"`
-
-	unescaped, err := strconv.Unquote(quotedString)
+	// strconv.Unquote cannot parse this: sanitize strings contain literal newlines and JS escapes
+	// like \x27/\x22; wrapping in Go quotes fails with "invalid syntax". Use the same decoder as
+	// ExtractSanitizedHTML / parser.go (decodeJavaScriptEscapedString).
+	unescaped, err := decodeJavaScriptEscapedString(jsString)
 	if err != nil {
-		logger.Error("unescape_js_string", "Failed to unquote JavaScript string", err, nil)
-		return "", fmt.Errorf("failed to unquote JavaScript string: %v", err)
+		logger.Error("unescape_js_string", "Failed to decode JavaScript string escapes", err, nil)
+		return "", fmt.Errorf("failed to decode JavaScript string: %w", err)
 	}
 
 	logger.Info("unescape_js_string", fmt.Sprintf("Unescaped HTML length: %d characters", len(unescaped)), nil)

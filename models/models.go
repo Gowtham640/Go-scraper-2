@@ -221,13 +221,20 @@ type Job struct {
 	RequestedDataTypes []string `json:"-"` // JSON omit
 }
 
+// Job source: who created the job row (persisted on public.jobs.job_source).
+const (
+	JobSourceInternal = "internal" // worker, scheduler, or backend self-enqueue
+	JobSourceExternal = "external" // HTTP handlers / frontend-driven requests
+)
+
 // JobCreateRequest represents the data needed to create a job
 type JobCreateRequest struct {
 	UserID             string
 	JobType            string
 	DataType           string
 	Priority           int
-	Email              string   // For login jobs
+	JobSource          string // JobSourceInternal or JobSourceExternal; empty defaults to internal in storage
+	Email              string // For login jobs
 	Password           string   // For login jobs
 	RequestedDataTypes []string // For login jobs - data types to fetch after login
 }
@@ -239,6 +246,8 @@ type WorkerLoginRequest struct {
 	Password           string
 	Priority           int
 	RequestedDataTypes []string
+	// LoginJobID is the DB jobs.id for this login run; used to mark the job done before post-login fetch enqueue.
+	LoginJobID string
 }
 
 const (

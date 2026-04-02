@@ -227,6 +227,11 @@ func (s *SessionManager) FetchUserInfo(userID, email string) (*models.UserInfo, 
 		return nil, err
 	}
 
+	// Persist raw download for debugging (timetable page URL)
+	if err := os.WriteFile("tt.html", htmlContent, 0644); err != nil {
+		logger.ErrorWithUser(email, "session_fetch_user_info", "Failed to save tt.html", err, nil)
+	}
+
 	// Update users.html with fetched HTML content
 	err = os.WriteFile("users.html", []byte(htmlContent), 0644)
 	if err != nil {

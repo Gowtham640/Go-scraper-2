@@ -3,7 +3,6 @@ package scraper
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"strconv"
@@ -12,57 +11,32 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
-// decodeJSEscapes decodes JavaScript hex escape sequences (\xXX) to actual characters
-func decodeJSEscapes(s string) string {
-	// Replace \xXX with actual characters where XX is hex
-	re := regexp.MustCompile(`\\x([0-9a-fA-F]{2})`)
-	return re.ReplaceAllStringFunc(s, func(match string) string {
-		hex := match[2:] // Remove \x prefix
-		if val, err := strconv.ParseInt(hex, 16, 8); err == nil {
-			return string(rune(val))
-		}
-		return match // Return original if parsing fails
-	})
-}
-
-// ExtractHTMLFromSanitizer extracts and decodes HTML from pageSanitizer.sanitize() calls
+// ExtractHTMLFromSanitizer extracts and decodes HTML from pageSanitizer.sanitize() calls.
+// Uses ExtractSanitizedHTML so JS escapes like \\/, \\n, and \\xNN are decoded; otherwise tags such as
+// </style> stay escaped and goquery sees no real DOM tables.
 func ExtractHTMLFromSanitizer(htmlContent string, filename string) (string, error) {
-	// Check if HTML contains pageSanitizer.sanitize() call
 	if strings.Contains(htmlContent, "pageSanitizer.sanitize(") {
 		logger.Info("extract_html", "Found pageSanitizer.sanitize() call, extracting content", map[string]interface{}{
 			"filename": filename,
 		})
 
-		// Extract content from pageSanitizer.sanitize() call
-		start := strings.Index(htmlContent, "pageSanitizer.sanitize('")
-		if start == -1 {
-			logger.Error("extract_html", "Could not find pageSanitizer.sanitize start", nil, nil)
-			return "", fmt.Errorf("could not find pageSanitizer.sanitize start")
+		actualHTML, err := ExtractSanitizedHTML(htmlContent)
+		if err != nil {
+			logger.Error("extract_html", "ExtractSanitizedHTML failed", err, map[string]interface{}{
+				"filename": filename,
+			})
+			return "", err
 		}
 
-		start += len("pageSanitizer.sanitize('")
-		end := strings.Index(htmlContent[start:], "');")
-		if end == -1 {
-			logger.Error("extract_html", "Could not find pageSanitizer.sanitize end", nil, nil)
-			return "", fmt.Errorf("could not find pageSanitizer.sanitize end")
-		}
-
-		// Extract the escaped HTML content
-		escapedHTML := htmlContent[start : start+end]
-
-		// Decode JavaScript hex escape sequences
-		actualHTML := decodeJSEscapes(escapedHTML)
-
-		// Save the unescaped HTML to file
-		err := os.WriteFile(filename, []byte(actualHTML), 0644)
+		err = os.WriteFile(filename, []byte(actualHTML), 0644)
 		if err != nil {
 			logger.Error("extract_html", "Failed to save unescaped HTML", err, map[string]interface{}{
 				"filename": filename,
 			})
 		} else {
 			logger.Info("extract_html", "Saved unescaped HTML", map[string]interface{}{
-				"filename": filename,
-				"original_length": len(htmlContent),
+				"filename":         filename,
+				"original_length":  len(htmlContent),
 				"unescaped_length": len(actualHTML),
 			})
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"srm-academia-scraper/cookiecheck"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
 	"srm-academia-scraper/passcrypt"
@@ -21,6 +22,14 @@ type SupabaseClient struct {
 }
 
 var ErrQueueFull = errors.New("queue_full")
+
+// ErrLoginRateLimited is returned when a new login job is rejected because a successful
+// auth job completed within the configured cooldown window.
+var ErrLoginRateLimited = errors.New("login rate limited")
+
+// LoginAuthCooldown is the minimum time between enqueueing or claiming a new login job after a
+// successful auth (done) job for the same user.
+const LoginAuthCooldown = 5 * time.Minute
 
 const (
 	allowedCalendarEmail = "gr8790@srmist.edu.in"
@@ -190,8 +199,16 @@ func (s *SupabaseClient) DecryptStoredPassword(encryptedPasswordB64, passwordIVB
 
 // UpsertToken stores or updates session tokens in public.tokens table
 func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays int) error {
+	missing := cookiecheck.GetMissingCriticalCookies(tokens)
+	missingJSON, err := json.Marshal(missing)
+	if err != nil {
+		return fmt.Errorf("marshal missing_tokens: %w", err)
+	}
+	missingStr := string(missingJSON)
+
 	logger.InfoWithUser(email, "upsert_token", "Upserting token", map[string]interface{}{
-		"expiry_days": expiryDays,
+		"expiry_days":   expiryDays,
+		"missing_count": len(missing),
 	})
 
 	expiryTimestamp := time.Now().Add(time.Duration(expiryDays) * 24 * time.Hour)
@@ -201,10 +218,10 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 		"tokens":           tokens,
 		"expiry_timestamp": expiryTimestamp.Format(time.RFC3339),
 		"email":            email,
+		"missing_tokens":   missingStr,
 	}
 
 	var result []map[string]interface{}
-	var err error
 
 	var existing []map[string]interface{}
 	_, err = s.client.From("tokens").
@@ -222,6 +239,7 @@ func (s *SupabaseClient) UpsertToken(userID, email, tokens string, expiryDays in
 			"expiry_timestamp": expiryTimestamp.Format(time.RFC3339),
 			"email":            email,
 			"failure_count":    0,
+			"missing_tokens":   missingStr,
 		}
 
 		logger.InfoWithUser(email, "upsert_token", "Updating existing token", map[string]interface{}{"token_id": existing[0]["id"]})
@@ -834,6 +852,87 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 	return unmarshaledData, &updatedAt, expiresAt, nil
 }
 
+// userHasRunningJob reports whether this user already has a job in "running" status (any type).
+func (s *SupabaseClient) userHasRunningJob(userID string) (bool, error) {
+	var rows []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("id", "", false).
+		Eq("user_id", userID).
+		Eq("status", "running").
+		Limit(1, "").
+		ExecuteTo(&rows)
+	if err != nil {
+		return false, err
+	}
+	return len(rows) > 0, nil
+}
+
+// HasRecentSuccessfulLoginJob is true when a done login/auth row exists for this user whose
+// created_at is after (now - within). We use created_at (always present on public.jobs) instead
+// of completed_at so no extra migration is required; for fast-completing logins this matches
+// "recent success" well. Optional migration supabase/migrations/*_jobs_completed_at.sql adds
+// completed_at for stricter timing if you apply it and switch this filter.
+func (s *SupabaseClient) HasRecentSuccessfulLoginJob(userID string, within time.Duration) (bool, error) {
+	cutoff := time.Now().Add(-within).UTC().Format(time.RFC3339)
+	var rows []map[string]interface{}
+	_, err := s.client.From("jobs").
+		Select("id", "", false).
+		Eq("user_id", userID).
+		Eq("job_type", "login").
+		Eq("data_type", "auth").
+		Eq("status", "done").
+		Gt("created_at", cutoff).
+		Limit(1, "").
+		ExecuteTo(&rows)
+	if err != nil {
+		logger.Error("has_recent_successful_login_job", "query public.jobs failed", err, map[string]interface{}{
+			"user_id": userID,
+			"cutoff":  cutoff,
+		})
+		return false, err
+	}
+	return len(rows) > 0, nil
+}
+
+// insertFailedLoginRateLimit persists a terminal failed login job when cooldown blocks a new pending login.
+func (s *SupabaseClient) insertFailedLoginRateLimit(req models.JobCreateRequest) error {
+	reason := "login rate limited: successful auth within last 5 minutes"
+	src := req.JobSource
+	if src == "" {
+		src = models.JobSourceExternal
+	}
+	jobData := map[string]interface{}{
+		"user_id":        req.UserID,
+		"job_type":       "login",
+		"data_type":      "auth",
+		"status":         "failed",
+		"priority":       req.Priority,
+		"failure_reason": reason,
+		"job_source":     src,
+	}
+	var ins []map[string]interface{}
+	_, err := s.client.From("jobs").Insert(jobData, false, "", "", "").ExecuteTo(&ins)
+	if err != nil {
+		return err
+	}
+	if len(ins) == 0 {
+		return fmt.Errorf("failed to insert rate-limited login job row")
+	}
+	return nil
+}
+
+// isJobConcurrencyViolation returns true when an update failed because another row is already running for the user
+// (partial unique index jobs_one_running_per_user) or a similar uniqueness rule fired.
+func isJobConcurrencyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") ||
+		strings.Contains(msg, "unique") ||
+		strings.Contains(msg, "23505")
+}
+
 // EnqueueJob creates a new job with deduplication logic
 // For login jobs, returns a WorkerLoginRequest that should be sent to the worker
 func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *models.WorkerLoginRequest, error) {
@@ -844,10 +943,25 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 		"priority":  req.Priority,
 	})
 
+	// Do not enqueue while this user already has a job executing (any job_type / data_type).
+	hasRunning, err := s.userHasRunningJob(req.UserID)
+	if err != nil {
+		logger.Error("enqueue_job", "Failed to check running jobs for user", err, map[string]interface{}{
+			"user_id": req.UserID,
+		})
+		return nil, nil, err
+	}
+	if hasRunning {
+		logger.Info("enqueue_job", "User already has a running job, skipping enqueue", map[string]interface{}{
+			"user_id": req.UserID,
+		})
+		return nil, nil, fmt.Errorf("job already exists")
+	}
+
 	// Regular job handling for fetch jobs
 	// Check for existing active job (deduplication)
 	var existingResult []map[string]interface{}
-	_, err := s.client.From("jobs").
+	_, err = s.client.From("jobs").
 		Select("id, status", "", false).
 		Eq("user_id", req.UserID).
 		Eq("job_type", req.JobType).
@@ -870,13 +984,39 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 		return nil, nil, fmt.Errorf("job already exists")
 	}
 
+	// Login rate limit before inserting a pending row (avoids racing the worker on the same row).
+	if req.JobType == "login" && req.DataType == "auth" {
+		recent, err := s.HasRecentSuccessfulLoginJob(req.UserID, LoginAuthCooldown)
+		if err != nil {
+			return nil, nil, err
+		}
+		if recent {
+			if err := s.insertFailedLoginRateLimit(req); err != nil {
+				logger.Error("enqueue_job", "failed to insert rate-limited login job record", err, map[string]interface{}{
+					"user_id": req.UserID,
+				})
+				return nil, nil, err
+			}
+			logger.Info("enqueue_job", "Login rejected: recent successful auth for user (failed row inserted)", map[string]interface{}{
+				"user_id": req.UserID,
+			})
+			return nil, nil, ErrLoginRateLimited
+		}
+	}
+
+	jobSource := req.JobSource
+	if jobSource == "" {
+		jobSource = models.JobSourceInternal
+	}
+
 	// Insert new job
 	jobData := map[string]interface{}{
-		"user_id":   req.UserID,
-		"job_type":  req.JobType,
-		"data_type": req.DataType,
-		"status":    "pending",
-		"priority":  req.Priority,
+		"user_id":    req.UserID,
+		"job_type":   req.JobType,
+		"data_type":  req.DataType,
+		"status":     "pending",
+		"priority":   req.Priority,
+		"job_source": jobSource,
 	}
 
 	var result []map[string]interface{}
@@ -997,6 +1137,12 @@ func (s *SupabaseClient) ClaimNextJob() (*models.Job, error) {
 		ExecuteTo(&updateResult)
 
 	if err != nil {
+		if isJobConcurrencyViolation(err) {
+			logger.Info("claim_next_job", "Did not claim job: user already has a running job (concurrency)", map[string]interface{}{
+				"job_id": jobID,
+			})
+			return nil, nil
+		}
 		logger.Error("claim_next_job", "Failed to claim job", err, nil)
 		return nil, err
 	}
@@ -1136,6 +1282,12 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 		ExecuteTo(&updateResult)
 
 	if err != nil {
+		if isJobConcurrencyViolation(err) {
+			logger.Info("claim_attendance_job", "Did not claim job: user already has a running job (concurrency)", map[string]interface{}{
+				"job_id": jobID,
+			})
+			return nil, nil
+		}
 		logger.Error("claim_attendance_job", "Failed to claim attendance job", err, nil)
 		return nil, err
 	}
@@ -1225,8 +1377,10 @@ func (s *SupabaseClient) ClaimNextAttendanceJob() (*models.Job, error) {
 	return job, nil
 }
 
-// ClaimNextLoginJob claims only pending login jobs for execution.
+// ClaimNextLoginJob claims the next eligible pending login job, skipping users still in
+// LoginAuthCooldown after a successful auth (same window as EnqueueJob rate limit).
 func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
+	const scanLimit = 40
 	var jobsResult []map[string]interface{}
 	_, err := s.client.From("jobs").
 		Select("*", "", false).
@@ -1234,7 +1388,7 @@ func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
 		Eq("job_type", "login").
 		Order("priority", &postgrest.OrderOpts{Ascending: false}).
 		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
-		Limit(1, "").
+		Limit(scanLimit, "").
 		ExecuteTo(&jobsResult)
 	if err != nil {
 		logger.Error("claim_next_login_job", "Failed to find next login job", err, nil)
@@ -1244,39 +1398,66 @@ func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
 		return nil, nil
 	}
 
-	jobData := jobsResult[0]
-	jobID, err := requireStringField(jobData, "id")
-	if err != nil {
-		logger.Error("claim_next_login_job", "Invalid login job row: missing id", err, map[string]interface{}{
-			"row": jobData,
-		})
-		return nil, err
+	for _, jobData := range jobsResult {
+		userID, err := requireStringField(jobData, "user_id")
+		if err != nil {
+			continue
+		}
+		inCooldown, err := s.HasRecentSuccessfulLoginJob(userID, LoginAuthCooldown)
+		if err != nil {
+			return nil, err
+		}
+		if inCooldown {
+			logger.Info("claim_next_login_job", "Skipping login job: user in post-success auth cooldown", map[string]interface{}{
+				"user_id": userID,
+			})
+			continue
+		}
+
+		jobID, err := requireStringField(jobData, "id")
+		if err != nil {
+			logger.Error("claim_next_login_job", "Invalid login job row: missing id", err, map[string]interface{}{
+				"row": jobData,
+			})
+			continue
+		}
+
+		now := time.Now().Format(time.RFC3339)
+		updateData := map[string]interface{}{
+			"status":     "running",
+			"started_at": now,
+		}
+
+		var updateResult []map[string]interface{}
+		_, err = s.client.From("jobs").
+			Update(updateData, "", "").
+			Eq("id", jobID).
+			Eq("status", "pending").
+			ExecuteTo(&updateResult)
+		if err != nil {
+			if isJobConcurrencyViolation(err) {
+				logger.Info("claim_next_login_job", "Did not claim job: user already has a running job (concurrency)", map[string]interface{}{
+					"job_id": jobID,
+				})
+				continue
+			}
+			logger.Error("claim_next_login_job", "Failed to claim login job", err, nil)
+			return nil, err
+		}
+		if len(updateResult) == 0 {
+			logger.Info("claim_next_login_job", "Login job was claimed by another worker", map[string]interface{}{
+				"job_id": jobID,
+			})
+			continue
+		}
+
+		return s.buildJobFromClaimedLoginRow(jobData, jobID)
 	}
 
-	// Atomically claim the job.
-	now := time.Now().Format(time.RFC3339)
-	updateData := map[string]interface{}{
-		"status":     "running",
-		"started_at": now,
-	}
+	return nil, nil
+}
 
-	var updateResult []map[string]interface{}
-	_, err = s.client.From("jobs").
-		Update(updateData, "", "").
-		Eq("id", jobID).
-		Eq("status", "pending").
-		ExecuteTo(&updateResult)
-	if err != nil {
-		logger.Error("claim_next_login_job", "Failed to claim login job", err, nil)
-		return nil, err
-	}
-	if len(updateResult) == 0 {
-		logger.Info("claim_next_login_job", "Login job was claimed by another worker", map[string]interface{}{
-			"job_id": jobID,
-		})
-		return nil, nil
-	}
-
+func (s *SupabaseClient) buildJobFromClaimedLoginRow(jobData map[string]interface{}, jobID string) (*models.Job, error) {
 	userID, err := requireStringField(jobData, "user_id")
 	if err != nil {
 		logger.Error("claim_next_login_job", "Invalid login job row: missing user_id", err, map[string]interface{}{
@@ -1351,13 +1532,21 @@ func (s *SupabaseClient) ClaimNextLoginJob() (*models.Job, error) {
 	return job, nil
 }
 
-// UpdateJobStatus updates a job's status and optionally failure reason
-func (s *SupabaseClient) UpdateJobStatus(jobID, status string, failureReason *string) error {
-	logger.Info("update_job_status", "Updating job status", map[string]interface{}{
-		"job_id":         jobID,
-		"status":         status,
-		"failure_reason": failureReason,
-	})
+// UpdateJobStatus updates job status, optional failure_reason, and optional failure_tokens (JSON array text).
+// failureTokensJSON: nil = do not change failure_tokens; non-nil empty string = set NULL; non-nil non-empty = set JSON text.
+// When status is "done", failure_tokens is always cleared (NULL).
+func (s *SupabaseClient) UpdateJobStatus(jobID, status string, failureReason *string, failureTokensJSON *string) error {
+	logFields := map[string]interface{}{
+		"job_id": jobID,
+		"status": status,
+	}
+	if failureReason != nil {
+		logFields["failure_reason"] = *failureReason
+	}
+	if failureTokensJSON != nil {
+		logFields["failure_tokens_set"] = *failureTokensJSON != ""
+	}
+	logger.Info("update_job_status", "Updating job status", logFields)
 
 	updateData := map[string]interface{}{
 		"status": status,
@@ -1365,6 +1554,15 @@ func (s *SupabaseClient) UpdateJobStatus(jobID, status string, failureReason *st
 
 	if failureReason != nil {
 		updateData["failure_reason"] = *failureReason
+	}
+	if status == "done" {
+		updateData["failure_tokens"] = nil
+	} else if failureTokensJSON != nil {
+		if *failureTokensJSON == "" {
+			updateData["failure_tokens"] = nil
+		} else {
+			updateData["failure_tokens"] = *failureTokensJSON
+		}
 	}
 
 	var result []map[string]interface{}
@@ -1374,11 +1572,11 @@ func (s *SupabaseClient) UpdateJobStatus(jobID, status string, failureReason *st
 		ExecuteTo(&result)
 
 	if err != nil {
-		logger.Error("update_job_status", "Failed to update job status", err, nil)
+		logger.Error("update_job_status", "Failed to update job status", err, logFields)
 		return err
 	}
 
-	logger.Info("update_job_status", "Job status updated successfully", map[string]interface{}{
+	logger.Info("update_job_status", "Job status updated", map[string]interface{}{
 		"job_id": jobID,
 		"status": status,
 	})
@@ -1434,10 +1632,11 @@ func (s *SupabaseClient) EnqueueSpecificFetchJobs(userID string, requestedDataTy
 
 	for _, dataType := range requestedDataTypes {
 		req := models.JobCreateRequest{
-			UserID:   userID,
-			JobType:  "fetch",
-			DataType: dataType,
-			Priority: 10, // Fetch jobs are priority 10
+			UserID:    userID,
+			JobType:   "fetch",
+			DataType:  dataType,
+			Priority:  10, // Fetch jobs are priority 10
+			JobSource: models.JobSourceInternal,
 		}
 
 		_, _, err := s.EnqueueJob(req)

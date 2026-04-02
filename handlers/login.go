@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"srm-academia-scraper/logger"
@@ -98,20 +99,33 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 			JobType:            "login",
 			DataType:           "auth",
 			Priority:           100,
+			JobSource:          models.JobSourceExternal,
 			Email:              email,
 			Password:           req.Password,
 			RequestedDataTypes: []string{},
 		}
 		_, _, err = db.EnqueueJob(jobReq)
-		if err != nil && err.Error() != "job already exists" {
-			logger.ErrorWithUser(email, "login_handler", "Failed to enqueue direct login job", err, map[string]interface{}{
-				"user_id": userID,
-			})
-			sendJSONResponse(w, email, models.LoginResponse{
-				Success: false,
-				Error:   "Service temporarily unavailable",
-			})
-			return
+		if err != nil {
+			if errors.Is(err, storage.ErrLoginRateLimited) {
+				logger.WarnWithUser(email, "login_handler", "Login rejected: recent successful auth (cooldown)", map[string]interface{}{
+					"user_id": userID,
+				})
+				sendJSONResponse(w, email, models.LoginResponse{
+					Success: false,
+					Error:   "Please wait five minutes after your last successful login before retrying.",
+				})
+				return
+			}
+			if err.Error() != "job already exists" {
+				logger.ErrorWithUser(email, "login_handler", "Failed to enqueue direct login job", err, map[string]interface{}{
+					"user_id": userID,
+				})
+				sendJSONResponse(w, email, models.LoginResponse{
+					Success: false,
+					Error:   "Service temporarily unavailable",
+				})
+				return
+			}
 		}
 
 		logger.InfoWithUser(email, "login_handler", "Login job accepted and queued", map[string]interface{}{

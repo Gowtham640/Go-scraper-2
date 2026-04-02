@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"srm-academia-scraper/auth"
+	"srm-academia-scraper/cookiecheck"
 	"srm-academia-scraper/jobs"
 	"srm-academia-scraper/logger"
 	"srm-academia-scraper/models"
@@ -205,6 +206,7 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 			JobType:            "login",
 			DataType:           "auth",
 			Priority:           100,
+			JobSource:          models.JobSourceExternal,
 			Email:              email,
 			Password:           req.Password,
 			RequestedDataTypes: initialRequested,
@@ -223,12 +225,13 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 			JobType:            "login",
 			DataType:           "auth",
 			Priority:           50,
+			JobSource:          models.JobSourceExternal,
 			Email:              email,
 			Password:           req.Password,
 			RequestedDataTypes: []string{dataType},
 		}
 	} else {
-		missingCritical := auth.GetMissingCriticalCookies(tokenData.Tokens)
+		missingCritical := cookiecheck.GetMissingCriticalCookies(tokenData.Tokens)
 		if len(missingCritical) > 0 {
 			if req.Password == "" {
 				logger.WarnWithUser(email, handlerName, "Missing critical tokens but no password provided", map[string]interface{}{
@@ -246,6 +249,7 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 				JobType:            "login",
 				DataType:           "auth",
 				Priority:           100,
+				JobSource:          models.JobSourceExternal,
 				Email:              email,
 				Password:           req.Password,
 				RequestedDataTypes: initialRequested,
@@ -253,15 +257,23 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 		} else {
 			logger.InfoWithUser(email, handlerName, "Token valid, enqueuing fetch job", nil)
 			jobReq = models.JobCreateRequest{
-				UserID:   userID,
-				JobType:  "fetch",
-				DataType: dataType,
-				Priority: 10,
+				UserID:    userID,
+				JobType:   "fetch",
+				DataType:  dataType,
+				Priority:  10,
+				JobSource: models.JobSourceExternal,
 			}
 		}
 	}
 
 	if err := jobManager.EnqueueJob(jobReq); err != nil {
+		if errors.Is(err, storage.ErrLoginRateLimited) {
+			logger.WarnWithUser(email, handlerName, "Login job rejected: recent successful auth (cooldown)", map[string]interface{}{
+				"user_id": userID,
+			})
+			respondFailure(w, "login_rate_limited")
+			return
+		}
 		if errors.Is(err, storage.ErrQueueFull) {
 			logger.WarnWithUser(email, handlerName, "Queue full", map[string]interface{}{
 				"user_type": req.UserType,
