@@ -78,7 +78,6 @@ func (s *SupabaseClient) UpsertUser(userID, email string, userInfo *models.UserI
 	data := map[string]interface{}{
 		"id":             userID,
 		"email":          email,
-		"role":           "public",
 		"semester":       userInfo.Semester,
 		"name":           userInfo.Name,
 		"regnumber":      userInfo.RegNumber,
@@ -1573,6 +1572,27 @@ func (s *SupabaseClient) UpdateJobStatus(jobID, status string, failureReason *st
 			updateData["failure_tokens"] = nil
 		} else {
 			updateData["failure_tokens"] = *failureTokensJSON
+		}
+	}
+
+	// Persist wall time for analytics: ms from started_at to now for terminal statuses.
+	if status == "done" || status == "failed" {
+		var startedRows []map[string]interface{}
+		_, selErr := s.client.From("jobs").
+			Select("started_at", "", false).
+			Eq("id", jobID).
+			Limit(1, "").
+			ExecuteTo(&startedRows)
+		if selErr == nil && len(startedRows) > 0 {
+			if startedStr, ok := startedRows[0]["started_at"].(string); ok && startedStr != "" {
+				if t0, perr := time.Parse(time.RFC3339, startedStr); perr == nil {
+					ms := time.Since(t0).Milliseconds()
+					if ms < 0 {
+						ms = 0
+					}
+					updateData["duration"] = ms
+				}
+			}
 		}
 	}
 
