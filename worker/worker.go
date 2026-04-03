@@ -548,10 +548,15 @@ func (w *Worker) fetchCourses(job *models.Job, tokenData *models.TokenData) (boo
 		return false, &failureMsg
 	}
 
+	rawCourses := string(htmlContent)
+	if msg := w.failIfLoginPageResponse(job, rawCourses, "fetch_courses", scraper.TimeTableURL); msg != nil {
+		return false, msg
+	}
+
 	saveWorkerDebugHTML("fetch_courses", "tt.html", htmlContent, job)
 
 	// Extract and parse HTML
-	actualHTML, err := scraper.ExtractHTMLFromSanitizer(string(htmlContent), "courses.html")
+	actualHTML, err := scraper.ExtractHTMLFromSanitizer(rawCourses, "courses.html")
 	if err != nil {
 		failureMsg := fmt.Sprintf("HTML extraction failed: %v", err)
 		return false, &failureMsg
@@ -565,7 +570,7 @@ func (w *Worker) fetchCourses(job *models.Job, tokenData *models.TokenData) (boo
 	}
 
 	// Parse courses
-	coursesData, err := scraper.ParseCourses(string(htmlContent), userInfo.RegNumber)
+	coursesData, err := scraper.ParseCourses(rawCourses, userInfo.RegNumber)
 	if err != nil {
 		failureMsg := fmt.Sprintf("Courses parsing failed: %v", err)
 		return false, &failureMsg
@@ -610,6 +615,9 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 			"error":   err.Error(),
 		})
 	} else {
+		if msg := w.failIfLoginPageResponse(job, string(htmlContent), "fetch_timetable", scraper.TimeTableURL); msg != nil {
+			return false, msg
+		}
 		saveWorkerDebugHTML("fetch_timetable", "tt.html", htmlContent, job)
 	}
 
@@ -741,10 +749,15 @@ func (w *Worker) fetchCalendar(job *models.Job, tokenData *models.TokenData) (bo
 		return false, &failureMsg
 	}
 
+	rawCal := string(htmlContent)
+	if msg := w.failIfLoginPageResponse(job, rawCal, "fetch_calendar", scraper.CalendarURL); msg != nil {
+		return false, msg
+	}
+
 	saveWorkerDebugHTML("fetch_calendar", "calendar.html", htmlContent, job)
 
 	// Decode HTML entities
-	actualHTML := scraper.DecodeHTMLEntities(string(htmlContent))
+	actualHTML := scraper.DecodeHTMLEntities(rawCal)
 
 	// Parse calendar
 	calendarData, err := scraper.ParseCalendar(actualHTML)
@@ -824,59 +837,6 @@ func (w *Worker) enqueueAttendanceLogin(userID string) {
 	}
 }
 
-func isLikelyLoginPage(body string) bool {
-	isLoginLike, _ := detectLoginLikePage(body)
-	return isLoginLike
-}
-
-func detectLoginLikePage(body string) (bool, []string) {
-	indicators := make([]string, 0, 8)
-	// Login shell HTML from the portal is consistently ~8k bytes; treat that size band as a login page.
-	n := len(body)
-	if n >= 7500 && n <= 8500 {
-		indicators = append(indicators, "size:~8k_login_page")
-		return true, indicators
-	}
-
-	lowered := strings.ToLower(body)
-
-	if strings.Contains(lowered, "login") {
-		indicators = append(indicators, "contains:login")
-	}
-	if strings.Contains(lowered, "signin") || strings.Contains(lowered, "sign in") {
-		indicators = append(indicators, "contains:signin")
-	}
-	if strings.Contains(lowered, "password") || strings.Contains(lowered, "type=\"password\"") {
-		indicators = append(indicators, "contains:password_field")
-	}
-	if strings.Contains(lowered, "email") || strings.Contains(lowered, "type=\"email\"") {
-		indicators = append(indicators, "contains:email_field")
-	}
-	if strings.Contains(lowered, "<iframe") {
-		indicators = append(indicators, "contains:iframe")
-	}
-	if strings.Contains(lowered, "accounts/p/") || strings.Contains(lowered, "iamcsr") || strings.Contains(lowered, "zoho") {
-		indicators = append(indicators, "contains:auth_provider_marker")
-	}
-	if strings.Contains(lowered, "ct_csrf_token") || strings.Contains(lowered, "_zcsr_tmp") {
-		indicators = append(indicators, "contains:auth_csrf_cookie_marker")
-	}
-	if strings.Contains(lowered, "window.location") || strings.Contains(lowered, "location.href") {
-		indicators = append(indicators, "contains:client_redirect_script")
-	}
-
-	strongSignal := (strings.Contains(lowered, "login") || strings.Contains(lowered, "signin")) &&
-		(strings.Contains(lowered, "password") || strings.Contains(lowered, "type=\"password\""))
-	if strongSignal {
-		return true, indicators
-	}
-
-	if len(indicators) >= 3 {
-		return true, indicators
-	}
-	return false, indicators
-}
-
 func extractLikelyFinalURL(body, fallbackURL string) string {
 	lowered := strings.ToLower(body)
 	markers := []string{"location.href=", "window.location=", "window.location.href=", "action="}
@@ -922,6 +882,27 @@ func snippet(body string) string {
 	return body[:max]
 }
 
+// failIfLoginPageResponse runs scraper.DetectLoginLikePage on the raw GET body for every fetch job.
+// If the portal returned the login shell, it enqueues relogin and returns a permanent failure reason.
+func (w *Worker) failIfLoginPageResponse(job *models.Job, rawHTML string, logTag string, pageURL string) *string {
+	isLogin, indicators := scraper.DetectLoginLikePage(rawHTML)
+	if !isLogin {
+		return nil
+	}
+	finalURL := extractLikelyFinalURL(rawHTML, pageURL)
+	logger.Warn(logTag, "Login shell detected in fetch response body", map[string]interface{}{
+		"job_id":     job.ID,
+		"user_id":    job.UserID,
+		"data_type":  job.DataType,
+		"final_url":  finalURL,
+		"indicators": indicators,
+		"raw_bytes":  len(rawHTML),
+		"snippet":    snippet(rawHTML),
+	})
+	w.enqueueLoginJobForUser(job.UserID, job.DataType)
+	return stringPtr(fmt.Sprintf("Login page detected while fetching %s | page_url=%s", job.DataType, finalURL))
+}
+
 // fetchMarks fetches marks data
 func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool, *string) {
 	logger.Info("fetch_marks", "step: start", map[string]interface{}{
@@ -961,6 +942,10 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 	}
 
 	rawHTML := string(htmlContent)
+	if msg := w.failIfLoginPageResponse(job, rawHTML, "fetch_marks", scraper.AttendanceURL); msg != nil {
+		return false, msg
+	}
+
 	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
 		logger.Warn("fetch_marks", "Sanitized extraction failed, falling back to decoded raw HTML", map[string]interface{}{
@@ -973,20 +958,6 @@ func (w *Worker) fetchMarks(job *models.Job, tokenData *models.TokenData) (bool,
 
 	if decodedHTML == "" {
 		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
-		isLoginLike, indicators := detectLoginLikePage(rawHTML)
-		if isLoginLike {
-			logger.Error("fetch_marks", "login page instead of marks", err, map[string]interface{}{
-				"job_id":     job.ID,
-				"user_id":    job.UserID,
-				"final_url":  finalURL,
-				"indicators": indicators,
-				"raw_bytes":  len(rawHTML),
-				"snippet":    snippet(rawHTML),
-			})
-			w.enqueueAttendanceLogin(job.UserID)
-			failureMsg := fmt.Sprintf("Login page detected while fetching marks | page_url=%s", finalURL)
-			return false, &failureMsg
-		}
 
 		failureMsg := fmt.Sprintf("Failed to extract marks HTML | page_url=%s", finalURL)
 		logger.Error("fetch_marks", failureMsg, err, map[string]interface{}{
@@ -1047,6 +1018,10 @@ func (w *Worker) fetchAttendancePageHTML(job *models.Job, tokenData *models.Toke
 	}
 
 	rawHTML := string(htmlContent)
+	if fr := w.failIfLoginPageResponse(job, rawHTML, logType, scraper.AttendanceURL); fr != nil {
+		return "", fmt.Errorf("%s", *fr)
+	}
+
 	decodedHTML, err := scraper.ExtractSanitizedHTML(rawHTML)
 	if err != nil {
 		logger.Warn(logType, "Sanitized extraction failed, falling back to decoded raw HTML", map[string]interface{}{
@@ -1059,18 +1034,6 @@ func (w *Worker) fetchAttendancePageHTML(job *models.Job, tokenData *models.Toke
 
 	if decodedHTML == "" {
 		finalURL := extractLikelyFinalURL(rawHTML, scraper.AttendanceURL)
-		isLoginLike, indicators := detectLoginLikePage(rawHTML)
-		if isLoginLike {
-			logger.Warn(logType, "Detected login-like page instead of expected data", map[string]interface{}{
-				"job_id":     job.ID,
-				"user_id":    job.UserID,
-				"final_url":  finalURL,
-				"indicators": indicators,
-				"snippet":    snippet(rawHTML),
-			})
-			w.enqueueAttendanceLogin(job.UserID)
-			return "", fmt.Errorf("login page detected while fetching attendance data")
-		}
 
 		failureMsg := fmt.Sprintf("Failed to extract attendance/marks HTML | page_url=%s", finalURL)
 		logger.Warn(logType, "Final URL before failing job", map[string]interface{}{
@@ -1219,10 +1182,15 @@ func (w *Worker) fetchUserInfo(job *models.Job, tokenData *models.TokenData) (bo
 		return false, &failureMsg
 	}
 
+	rawUser := string(htmlContent)
+	if msg := w.failIfLoginPageResponse(job, rawUser, "fetch_user_info", scraper.TimeTableURL); msg != nil {
+		return false, msg
+	}
+
 	saveWorkerDebugHTML("fetch_user_info", "tt.html", htmlContent, job)
 
 	// Extract HTML
-	actualHTML, err := scraper.ExtractHTMLFromSanitizer(string(htmlContent), "users.html")
+	actualHTML, err := scraper.ExtractHTMLFromSanitizer(rawUser, "users.html")
 	if err != nil {
 		failureMsg := fmt.Sprintf("HTML extraction failed: %v", err)
 		return false, &failureMsg
