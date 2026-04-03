@@ -29,7 +29,7 @@ var ErrLoginRateLimited = errors.New("login rate limited")
 
 // LoginAuthCooldown is the minimum time between enqueueing or claiming a new login job after a
 // successful auth (done) job for the same user.
-const LoginAuthCooldown = 5 * time.Minute
+const LoginAuthCooldown = 10 * time.Minute
 
 const (
 	allowedCalendarEmail = "gr8790@srmist.edu.in"
@@ -852,6 +852,13 @@ func (s *SupabaseClient) GetUserCacheWithTimestamp(userID, dataType string) (int
 	return unmarshaledData, &updatedAt, expiresAt, nil
 }
 
+// isLoginAuthJobRequest is true for a login row that performs portal authentication (public.jobs:
+// job_type=login, data_type=auth). Used to avoid blocking login enqueue while another job is still
+// marked running for the same user.
+func isLoginAuthJobRequest(req models.JobCreateRequest) bool {
+	return req.JobType == "login" && req.DataType == "auth"
+}
+
 // userHasRunningJob reports whether this user already has a job in "running" status (any type).
 func (s *SupabaseClient) userHasRunningJob(userID string) (bool, error) {
 	var rows []map[string]interface{}
@@ -896,7 +903,7 @@ func (s *SupabaseClient) HasRecentSuccessfulLoginJob(userID string, within time.
 
 // insertFailedLoginRateLimit persists a terminal failed login job when cooldown blocks a new pending login.
 func (s *SupabaseClient) insertFailedLoginRateLimit(req models.JobCreateRequest) error {
-	reason := "login rate limited: successful auth within last 5 minutes"
+	reason := "login rate limited: successful auth within last 10 minutes"
 	src := req.JobSource
 	if src == "" {
 		src = models.JobSourceExternal
@@ -943,25 +950,29 @@ func (s *SupabaseClient) EnqueueJob(req models.JobCreateRequest) (*models.Job, *
 		"priority":  req.Priority,
 	})
 
-	// Do not enqueue while this user already has a job executing (any job_type / data_type).
-	hasRunning, err := s.userHasRunningJob(req.UserID)
-	if err != nil {
-		logger.Error("enqueue_job", "Failed to check running jobs for user", err, map[string]interface{}{
-			"user_id": req.UserID,
-		})
-		return nil, nil, err
-	}
-	if hasRunning {
-		logger.Info("enqueue_job", "User already has a running job, skipping enqueue", map[string]interface{}{
-			"user_id": req.UserID,
-		})
-		return nil, nil, fmt.Errorf("job already exists")
+	// Do not enqueue non-login work while this user already has any job executing. Login+auth
+	// requests are excluded: the current fetch job is still "running" until status is updated, so
+	// gating login on userHasRunningJob would skip relogin while the failing fetch holds the row.
+	if !isLoginAuthJobRequest(req) {
+		hasRunning, err := s.userHasRunningJob(req.UserID)
+		if err != nil {
+			logger.Error("enqueue_job", "Failed to check running jobs for user", err, map[string]interface{}{
+				"user_id": req.UserID,
+			})
+			return nil, nil, err
+		}
+		if hasRunning {
+			logger.Info("enqueue_job", "User already has a running job, skipping enqueue", map[string]interface{}{
+				"user_id": req.UserID,
+			})
+			return nil, nil, fmt.Errorf("job already exists")
+		}
 	}
 
 	// Regular job handling for fetch jobs
 	// Check for existing active job (deduplication)
 	var existingResult []map[string]interface{}
-	_, err = s.client.From("jobs").
+	_, err := s.client.From("jobs").
 		Select("id, status", "", false).
 		Eq("user_id", req.UserID).
 		Eq("job_type", req.JobType).
