@@ -455,6 +455,26 @@ func (s *SupabaseClient) UpsertUserCache(userID, dataType string, data interface
 	return nil
 }
 
+// GetTimetableModification returns modified_json for a user, or nil if no row exists.
+func (s *SupabaseClient) GetTimetableModification(userID string) ([]byte, error) {
+	var rows []map[string]interface{}
+	_, err := s.client.From("timetable_modification").
+		Select("modified_json", "", false).
+		Eq("user_id", userID).
+		ExecuteTo(&rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	raw, ok := rows[0]["modified_json"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	return json.Marshal(raw)
+}
+
 // UpsertCalendar updates only the fixed calendar row in public.calendar.
 // No insert fallback is allowed.
 func (s *SupabaseClient) UpsertCalendar(course string, semester int, data interface{}) error {

@@ -696,6 +696,24 @@ func (w *Worker) fetchTimetable(job *models.Job, tokenData *models.TokenData) (b
 	timetableData.RegNumber = coursesDataTyped.RegNumber
 	timetableData.Batch = userBatch
 
+	// Optional sparse overrides from public.timetable_modification (merged before user_cache upsert).
+	modBytes, modErr := w.db.GetTimetableModification(job.UserID)
+	if modErr != nil {
+		logger.Warn("fetch_timetable", "timetable_modification read failed", map[string]interface{}{
+			"job_id":  job.ID,
+			"user_id": job.UserID,
+			"error":   modErr.Error(),
+		})
+	} else if len(modBytes) > 0 {
+		if applyErr := storage.ApplyTimetableModifications(timetableData, modBytes); applyErr != nil {
+			logger.Warn("fetch_timetable", "apply timetable modifications failed", map[string]interface{}{
+				"job_id":  job.ID,
+				"user_id": job.UserID,
+				"error":   applyErr.Error(),
+			})
+		}
+	}
+
 	// Store timetable in cache
 	err = w.db.UpsertUserCache(job.UserID, "timetable", timetableData, 24*30) // 1 month for timetable
 	if err != nil {
