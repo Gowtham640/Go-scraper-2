@@ -145,10 +145,10 @@ func (s *SupabaseClient) SaveUserEncryptedPassword(userID, email, plaintext stri
 	})
 
 	// Upsert so a row exists even before profile fields are filled by FetchUserInfo.
+	// Do not set role here: merges would overwrite manual admin (or other) roles; new rows use DB default.
 	data := map[string]interface{}{
 		"id":                 userID,
 		"email":              email,
-		"role":               "public",
 		"encrypted_password": encB64,
 		"password_iv":        ivB64,
 		"password_tag":       tagB64,
