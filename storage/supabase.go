@@ -29,7 +29,7 @@ var ErrLoginRateLimited = errors.New("login rate limited")
 
 // LoginAuthCooldown is the minimum time between enqueueing or claiming a new login job after a
 // successful auth (done) job for the same user.
-const LoginAuthCooldown = 10 * time.Minute
+const LoginAuthCooldown = 3 * time.Minute
 
 const (
 	allowedCalendarEmail = "gr8790@srmist.edu.in"
@@ -922,7 +922,7 @@ func (s *SupabaseClient) HasRecentSuccessfulLoginJob(userID string, within time.
 
 // insertFailedLoginRateLimit persists a terminal failed login job when cooldown blocks a new pending login.
 func (s *SupabaseClient) insertFailedLoginRateLimit(req models.JobCreateRequest) error {
-	reason := "login rate limited: successful auth within last 10 minutes"
+	reason := fmt.Sprintf("login rate limited: successful auth within last %v", LoginAuthCooldown)
 	src := req.JobSource
 	if src == "" {
 		src = models.JobSourceExternal

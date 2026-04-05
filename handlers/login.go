@@ -112,7 +112,7 @@ func LoginHandler(db *storage.SupabaseClient) http.HandlerFunc {
 				})
 				sendJSONResponse(w, email, models.LoginResponse{
 					Success: false,
-					Error:   "Please wait five minutes after your last successful login before retrying.",
+					Error:   "Please try again after a few minutes",
 				})
 				return
 			}
