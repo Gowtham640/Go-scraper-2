@@ -271,7 +271,7 @@ func handleAndEnqueueDataRequest(jobManager *jobs.Manager, handlerName, dataType
 			logger.WarnWithUser(email, handlerName, "Login job rejected: recent successful auth (cooldown)", map[string]interface{}{
 				"user_id": userID,
 			})
-			respondFailure(w, "login_rate_limited")
+			respondFailure(w, "Please try again after a few minutes")
 			return
 		}
 		if errors.Is(err, storage.ErrQueueFull) {

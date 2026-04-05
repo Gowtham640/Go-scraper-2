@@ -3,11 +3,24 @@ package middleware
 import (
 	"net/http"
 	"srm-academia-scraper/logger"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
+
+// allowedCORSOrigins are the only browser Origins that receive Access-Control-Allow-Origin.
+// Impact: other web apps cannot read responses from this API in the browser; server-to-server calls are unchanged.
+var allowedCORSOrigins = map[string]struct{}{
+	"http://localhost:3000":         {},
+	"https://sdashsrm.vercel.app": {},
+}
+
+func corsAllowOrigin(origin string) bool {
+	_, ok := allowedCORSOrigins[strings.TrimSpace(origin)]
+	return ok
+}
 
 // RateLimiter stores rate limiters for each IP
 type RateLimiter struct {
@@ -55,10 +68,11 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 				"path":   r.URL.Path,
 				"method": r.Method,
 			})
-			
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error": "Too many requests"}`))
+			// Message aligned with login cooldown UX so clients can show one consistent hint.
+			w.Write([]byte(`{"error": "Please try again after a few minutes"}`))
 			return
 		}
 
@@ -80,12 +94,16 @@ func (rl *RateLimiter) CleanupOldLimiters(interval time.Duration) {
 	}()
 }
 
-// CORS middleware
+// CORS middleware: reflect Allow-Origin only for sdash dev and production; omit for others so browsers block reads.
 func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && corsAllowOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User-Id, X-Email, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User-Id, X-Email, X-Password, Authorization")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
